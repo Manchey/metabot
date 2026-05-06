@@ -49,6 +49,10 @@ interface RunningTask {
   processor: StreamProcessor;
   rateLimiter: RateLimiter;
   chatId: string;
+  /** Thread ID for topic-based conversation continuity */
+  threadId?: string;
+  /** The user's original message ID that started/continues the thread */
+  userMessageId: string;
 }
 
 export interface ApiTaskOptions {
@@ -587,8 +591,19 @@ export class MessageBridge {
   }
 
   private async executeQuery(msg: IncomingMessage): Promise<void> {
-    const { userId, chatId, text, imageKey, fileKey, fileName, messageId: msgId } = msg;
-    const session = this.sessionManager.getSession(chatId);
+    const { userId, chatId, text, imageKey, fileKey, fileName, messageId: msgId, threadId, rootId, parentMessageId } = msg;
+
+    // Use thread-aware session key: each thread has its own conversation context
+    // Key insight: rootId is the message ID that started the thread
+    // - First conversation: rootId is empty, so use msgId (user's first message ID)
+    // - Subsequent thread replies: rootId = first user message's ID
+    // This ensures thread continuity: first message and thread replies share the same session
+    const threadKey = rootId || msgId;
+    const sessionKey = `${chatId}:${threadKey}`;
+
+    this.logger.info({ msgId, threadId, rootId, parentMessageId, threadKey, sessionKey }, 'Thread session mapping');
+
+    const session = this.sessionManager.getSession(sessionKey);
     const cwd = session.workingDirectory;
     const abortController = new AbortController();
 
@@ -647,8 +662,8 @@ export class MessageBridge {
       }
     }
 
-    // Prepare per-chat outputs directory
-    const outputsDir = this.outputsManager.prepareDir(chatId);
+    // Prepare per-chat outputs directory (use sessionKey for thread isolation)
+    const outputsDir = this.outputsManager.prepareDir(sessionKey);
 
     // Send initial "thinking" card
     const mediaCount = 1 + (msg.extraMedia?.length || 0);
@@ -664,7 +679,16 @@ export class MessageBridge {
       toolCalls: [],
     };
 
-    const messageId = await this.sender.sendCard(chatId, initialState);
+    // Send initial card - use thread reply if supported
+    // Always reply in thread to create/continue topic-based conversation
+    let messageId: string | undefined;
+    if (this.sender.replyCard) {
+      messageId = await this.sender.replyCard(msgId, initialState, true);
+      this.logger.info({ msgId, threadKey, sessionKey }, 'Sent card as thread reply');
+    } else {
+      // Fallback for platforms without thread support
+      messageId = await this.sender.sendCard(chatId, initialState);
+    }
 
     if (!messageId) {
       this.logger.error('Failed to send initial card, aborting');
@@ -674,7 +698,7 @@ export class MessageBridge {
     const apiContext = { botName: this.config.name, chatId };
 
     // Start multi-turn execution
-    const executionHandle = this.executorForChat(chatId).startExecution({
+    const executionHandle = this.executorForChat(sessionKey).startExecution({
       prompt,
       cwd,
       sessionId: session.sessionId,
@@ -699,8 +723,10 @@ export class MessageBridge {
       processor,
       rateLimiter,
       chatId,
+      threadId: threadKey,
+      userMessageId: msgId,
     };
-    this.runningTasks.set(chatId, runningTask);
+    this.runningTasks.set(sessionKey, runningTask);
     metrics.setGauge('metabot_active_tasks', this.runningTasks.size);
 
     this.audit.log({ event: 'task_start', botName: this.config.name, chatId, userId, prompt: text });
@@ -793,7 +819,7 @@ export class MessageBridge {
         for (const tool of sdkTools) {
           this.logger.info({ chatId, toolName: tool.name, toolUseId: tool.toolUseId }, 'Detected SDK-handled tool');
           if (tool.name === 'ExitPlanMode') {
-            await this.sendPlanContent(chatId, processor, state);
+            await this.sendPlanContent(chatId, processor, state, runningTask.userMessageId);
           }
         }
 
@@ -921,7 +947,7 @@ export class MessageBridge {
       this.recordSession(chatId, displayPrompt, lastState.responseText, processor.getSessionId(), lastState.costUsd, durationMs);
 
       // Send completion notification for long-running tasks (>10s) so user gets a Feishu push
-      await this.sendCompletionNotice(chatId, lastState, durationMs);
+      await this.sendCompletionNotice(chatId, lastState, durationMs, runningTask.userMessageId);
 
       // Send any output files produced by Claude
       await this.outputHandler.sendOutputFiles(chatId, outputsDir, processor, lastState);
@@ -1091,6 +1117,8 @@ export class MessageBridge {
       processor,
       rateLimiter,
       chatId,
+      threadId: undefined, // API tasks don't have thread context
+      userMessageId: '', // API tasks don't have a user message to reply to
     };
     this.runningTasks.set(chatId, runningTask);
     metrics.setGauge('metabot_active_tasks', this.runningTasks.size);
@@ -1412,7 +1440,7 @@ export class MessageBridge {
   /**
    * Read and send plan file content to the user when ExitPlanMode is triggered.
    */
-  private async sendPlanContent(chatId: string, processor: StreamProcessor, _currentState: CardState): Promise<void> {
+  private async sendPlanContent(chatId: string, processor: StreamProcessor, _currentState: CardState, userMessageId?: string): Promise<void> {
     const planPath = processor.getPlanFilePath();
     if (!planPath) return;
 
@@ -1421,7 +1449,12 @@ export class MessageBridge {
       if (!planContent.trim()) return;
 
       this.logger.info({ chatId, planPath }, 'Sending plan content to user');
-      await this.sender.sendTextNotice(chatId, '📋 Plan', planContent, 'green');
+      // Use thread reply if available (for Feishu)
+      if (this.sender.replyTextNotice && userMessageId) {
+        await this.sender.replyTextNotice(userMessageId, '📋 Plan', planContent, 'green', true);
+      } else {
+        await this.sender.sendTextNotice(chatId, '📋 Plan', planContent, 'green');
+      }
     } catch (err) {
       this.logger.warn({ err, planPath, chatId }, 'Failed to read plan file for display');
     }
@@ -1451,7 +1484,7 @@ export class MessageBridge {
     }
   }
 
-  private async sendCompletionNotice(chatId: string, state: CardState, durationMs: number): Promise<void> {
+  private async sendCompletionNotice(chatId: string, state: CardState, durationMs: number, userMessageId?: string): Promise<void> {
     // Some senders (WeChat) already send the final response as a standalone message, so skip
     if (this.sender.skipCompletionNotice) return;
     // Only notify for tasks that took a while — quick tasks don't need it
@@ -1488,7 +1521,12 @@ export class MessageBridge {
     const message = `${statusEmoji} ${statusWord} (${durationStr}${costStr}${modelStr}${usageStr})`;
 
     try {
-      await this.sender.sendText(chatId, message);
+      // Use thread reply if available (for Feishu)
+      if (this.sender.replyText && userMessageId) {
+        await this.sender.replyText(userMessageId, message, true);
+      } else {
+        await this.sender.sendText(chatId, message);
+      }
     } catch (err) {
       this.logger.warn({ err, chatId }, 'Failed to send completion notice');
     }

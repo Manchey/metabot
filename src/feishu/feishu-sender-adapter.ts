@@ -16,6 +16,10 @@ export class FeishuSenderAdapter implements IMessageSender {
     return this.sender.sendCard(chatId, buildCard(state));
   }
 
+  async replyCard(messageId: string, state: CardState, replyInThread: boolean): Promise<string | undefined> {
+    return this.sender.replyCard(messageId, buildCard(state), replyInThread);
+  }
+
   async updateCard(messageId: string, state: CardState): Promise<boolean> {
     return this.sender.updateCard(messageId, buildCard(state));
   }
@@ -24,8 +28,16 @@ export class FeishuSenderAdapter implements IMessageSender {
     await this.sender.sendCard(chatId, buildTextCard(title, content, color));
   }
 
+  async replyTextNotice(messageId: string, title: string, content: string, color: string = 'blue', replyInThread: boolean = true): Promise<void> {
+    await this.sender.replyCard(messageId, buildTextCard(title, content, color), replyInThread);
+  }
+
   async sendText(chatId: string, text: string): Promise<void> {
     return this.sender.sendText(chatId, text);
+  }
+
+  async replyText(messageId: string, text: string, replyInThread: boolean = true): Promise<void> {
+    return this.sender.replyText(messageId, text, replyInThread);
   }
 
   async sendImageFile(chatId: string, filePath: string): Promise<boolean> {

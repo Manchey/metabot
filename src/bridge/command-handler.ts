@@ -8,6 +8,9 @@ import { MemoryClient } from '../memory/memory-client.js';
 import { AuditLogger } from '../utils/audit-logger.js';
 import type { DocSync } from '../sync/doc-sync.js';
 
+/** Helper function type for sending thread-aware notice replies. */
+type ReplyNotice = (title: string, content: string, color?: string) => Promise<void>;
+
 export class CommandHandler {
   private docSync: DocSync | null = null;
 
@@ -32,14 +35,23 @@ export class CommandHandler {
     const { text } = msg;
     if (!text.startsWith('/')) return false;
 
-    const { userId, chatId } = msg;
+    const { userId, chatId, messageId } = msg;
     const [cmd] = text.split(/\s+/);
 
     this.audit.log({ event: 'command', botName: this.config.name, chatId, userId, prompt: cmd });
 
+    // Use thread reply if available (for Feishu)
+    const replyNotice: ReplyNotice = async (title, content, color) => {
+      if (this.sender.replyTextNotice && messageId) {
+        await this.sender.replyTextNotice(messageId, title, content, color, true);
+      } else {
+        await this.sender.sendTextNotice(chatId, title, content, color);
+      }
+    };
+
     switch (cmd.toLowerCase()) {
       case '/help':
-        await this.sender.sendTextNotice(chatId, '📖 Help', [
+        await replyNotice('📖 Help', [
           '**Available Commands:**',
           '`/reset` - Clear session, start fresh',
           '`/stop` - Abort current running task',
@@ -67,7 +79,7 @@ export class CommandHandler {
 
       case '/reset':
         this.sessionManager.resetSession(chatId);
-        await this.sender.sendTextNotice(chatId, '✅ Session Reset', 'Conversation cleared. Working directory preserved.', 'green');
+        await replyNotice('✅ Session Reset', 'Conversation cleared. Working directory preserved.', 'green');
         return true;
 
       case '/stop': {
@@ -75,9 +87,9 @@ export class CommandHandler {
         if (task) {
           this.audit.log({ event: 'task_stopped', botName: this.config.name, chatId, userId, durationMs: Date.now() - task.startTime });
           this.stopTask(chatId);
-          await this.sender.sendTextNotice(chatId, '🛑 Stopped', 'Current task has been aborted.', 'orange');
+          await replyNotice('🛑 Stopped', 'Current task has been aborted.', 'orange');
         } else {
-          await this.sender.sendTextNotice(chatId, 'ℹ️ No Running Task', 'There is no task to stop.', 'blue');
+          await replyNotice('ℹ️ No Running Task', 'There is no task to stop.', 'blue');
         }
         return true;
       }
@@ -89,7 +101,7 @@ export class CommandHandler {
         const activeEngine = session.engine ?? botEngine;
         const defaultModel = this.defaultModelForEngine(activeEngine) || '_default_';
         const activeModel = session.model || defaultModel;
-        await this.sender.sendTextNotice(chatId, '📊 Status', [
+        await replyNotice('📊 Status', [
           `**User:** \`${userId}\``,
           `**Engine:** \`${activeEngine}\`${session.engine ? ' (session override)' : ''}`,
           `**Working Directory:** \`${session.workingDirectory}\``,
@@ -102,19 +114,19 @@ export class CommandHandler {
 
       case '/memory': {
         const args = text.slice('/memory'.length).trim();
-        await this.handleMemoryCommand(chatId, args);
+        await this.handleMemoryCommand(chatId, args, replyNotice);
         return true;
       }
 
       case '/sync': {
         const args = text.slice('/sync'.length).trim();
-        await this.handleSyncCommand(chatId, args);
+        await this.handleSyncCommand(chatId, args, replyNotice);
         return true;
       }
 
       case '/model': {
         const args = text.slice('/model'.length).trim();
-        await this.handleModelCommand(chatId, args);
+        await this.handleModelCommand(chatId, args, replyNotice);
         return true;
       }
 
@@ -124,12 +136,11 @@ export class CommandHandler {
     }
   }
 
-  private async handleMemoryCommand(chatId: string, args: string): Promise<void> {
+  private async handleMemoryCommand(chatId: string, args: string, replyNotice: ReplyNotice): Promise<void> {
     const [subCmd, ...rest] = args.split(/\s+/);
 
     if (!subCmd) {
-      await this.sender.sendTextNotice(
-        chatId,
+      await replyNotice(
         '📝 Memory',
         'Usage:\n- `/memory list` — Show folder tree\n- `/memory search <query>` — Search documents\n- `/memory status` — Health check',
       );
@@ -141,24 +152,23 @@ export class CommandHandler {
         case 'list': {
           const tree = await this.memoryClient.listFolderTree();
           const formatted = this.memoryClient.formatFolderTree(tree);
-          await this.sender.sendTextNotice(chatId, '📂 Memory Folders', formatted);
+          await replyNotice('📂 Memory Folders', formatted);
           break;
         }
         case 'search': {
           const query = rest.join(' ').trim();
           if (!query) {
-            await this.sender.sendTextNotice(chatId, '📝 Memory', 'Usage: `/memory search <query>`');
+            await replyNotice('📝 Memory', 'Usage: `/memory search <query>`');
             return;
           }
           const results = await this.memoryClient.search(query);
           const formatted = this.memoryClient.formatSearchResults(results);
-          await this.sender.sendTextNotice(chatId, `🔍 Search: ${query}`, formatted);
+          await replyNotice(`🔍 Search: ${query}`, formatted);
           break;
         }
         case 'status': {
           const health = await this.memoryClient.health();
-          await this.sender.sendTextNotice(
-            chatId,
+          await replyNotice(
             '📝 Memory Status',
             `Status: ${health.status}\nDocuments: ${health.document_count}\nFolders: ${health.folder_count}`,
             'green',
@@ -166,17 +176,17 @@ export class CommandHandler {
           break;
         }
         default:
-          await this.sender.sendTextNotice(chatId, '📝 Memory', `Unknown sub-command: \`${subCmd}\`\nUse \`/memory\` for help.`, 'orange');
+          await replyNotice('📝 Memory', `Unknown sub-command: \`${subCmd}\`\nUse \`/memory\` for help.`, 'orange');
       }
     } catch (err: any) {
       this.logger.error({ err, chatId }, 'Memory command error');
-      await this.sender.sendTextNotice(chatId, '❌ Memory Error', `Failed to connect to memory server: ${err.message}`, 'red');
+      await replyNotice('❌ Memory Error', `Failed to connect to memory server: ${err.message}`, 'red');
     }
   }
 
-  private async handleSyncCommand(chatId: string, args: string): Promise<void> {
+  private async handleSyncCommand(chatId: string, args: string, replyNotice: ReplyNotice): Promise<void> {
     if (!this.docSync) {
-      await this.sender.sendTextNotice(chatId, '❌ Sync Unavailable', 'Wiki sync is not configured for this bot.', 'red');
+      await replyNotice('❌ Sync Unavailable', 'Wiki sync is not configured for this bot.', 'red');
       return;
     }
 
@@ -185,11 +195,11 @@ export class CommandHandler {
     if (!subCmd) {
       // Default: trigger full sync
       if (this.docSync.isSyncing()) {
-        await this.sender.sendTextNotice(chatId, '⏳ Sync In Progress', 'A sync is already running. Please wait.', 'orange');
+        await replyNotice('⏳ Sync In Progress', 'A sync is already running. Please wait.', 'orange');
         return;
       }
 
-      await this.sender.sendTextNotice(chatId, '🔄 Sync Started', 'Syncing MetaMemory documents to Feishu Wiki...', 'blue');
+      await replyNotice('🔄 Sync Started', 'Syncing MetaMemory documents to Feishu Wiki...', 'blue');
 
       try {
         const result = await this.docSync.syncAll();
@@ -210,10 +220,10 @@ export class CommandHandler {
           }
         }
         const color = result.errors.length > 0 ? 'orange' : 'green';
-        await this.sender.sendTextNotice(chatId, '✅ Sync Complete', lines.join('\n'), color);
+        await replyNotice('✅ Sync Complete', lines.join('\n'), color);
       } catch (err: any) {
         this.logger.error({ err, chatId }, 'Sync command error');
-        await this.sender.sendTextNotice(chatId, '❌ Sync Failed', err.message, 'red');
+        await replyNotice('❌ Sync Failed', err.message, 'red');
       }
       return;
     }
@@ -222,7 +232,7 @@ export class CommandHandler {
       case 'status': {
         const stats = this.docSync.getStats();
         const spaceId = stats.wikiSpaceId || 'Not configured';
-        await this.sender.sendTextNotice(chatId, '📊 Sync Status', [
+        await replyNotice('📊 Sync Status', [
           `**Wiki Space:** \`${spaceId}\``,
           `**Synced Documents:** ${stats.documentCount}`,
           `**Synced Folders:** ${stats.folderCount}`,
@@ -231,11 +241,11 @@ export class CommandHandler {
         break;
       }
       default:
-        await this.sender.sendTextNotice(chatId, '📝 Sync', 'Usage:\n- `/sync` — Sync all documents to Feishu Wiki\n- `/sync status` — Show sync status', 'blue');
+        await replyNotice('📝 Sync', 'Usage:\n- `/sync` — Sync all documents to Feishu Wiki\n- `/sync status` — Show sync status', 'blue');
     }
   }
 
-  private async handleModelCommand(chatId: string, args: string): Promise<void> {
+  private async handleModelCommand(chatId: string, args: string, replyNotice: ReplyNotice): Promise<void> {
     const session = this.sessionManager.getSession(chatId);
     const botEngine = resolveEngineName(this.config);
     const activeEngine = session.engine ?? botEngine;
@@ -256,7 +266,7 @@ export class CommandHandler {
         `- \`/model <name>\` — Set session model (e.g. ${exampleModels})`,
         '- `/model reset` — Clear overrides, use bot defaults',
       ];
-      await this.sender.sendTextNotice(chatId, '🤖 Model', lines.join('\n'));
+      await replyNotice('🤖 Model', lines.join('\n'));
       return;
     }
 
@@ -265,8 +275,7 @@ export class CommandHandler {
     // Engine switch — /model claude, /model kimi, or /model codex
     if (isEngineName(normalized)) {
       if (activeEngine === normalized) {
-        await this.sender.sendTextNotice(
-          chatId,
+        await replyNotice(
           'ℹ️ Already using ' + normalized,
           `This chat is already on the \`${normalized}\` engine.`,
           'blue',
@@ -274,8 +283,7 @@ export class CommandHandler {
         return;
       }
       this.sessionManager.setSessionEngine(chatId, normalized);
-      await this.sender.sendTextNotice(
-        chatId,
+      await replyNotice(
         `✅ Engine switched to ${normalized}`,
         [
           `Next message will run on the **${normalized}** engine.`,
@@ -336,7 +344,7 @@ export class CommandHandler {
         lines.push('_Tip: leave unset to use the kimi-cli default (recommended for subscription users — the server picks the best available)._');
       }
       lines.push('Use `/model <name>` to set the model for the current engine.');
-      await this.sender.sendTextNotice(chatId, '🤖 Available Models', lines.join('\n'));
+      await replyNotice('🤖 Available Models', lines.join('\n'));
       return;
     }
 
@@ -345,8 +353,7 @@ export class CommandHandler {
       this.sessionManager.setSessionModel(chatId, undefined);
       this.sessionManager.setSessionEngine(chatId, undefined);
       const fallback = botDefault || '_default_';
-      await this.sender.sendTextNotice(
-        chatId,
+      await replyNotice(
         '✅ Overrides Cleared',
         `Session engine and model overrides cleared. Using bot defaults: engine \`${botEngine}\`, model \`${fallback}\`.`,
         'green',
@@ -357,8 +364,7 @@ export class CommandHandler {
     // Set the model (use only the first token, ignore trailing junk)
     const newModel = args.split(/\s+/)[0];
     this.sessionManager.setSessionModel(chatId, newModel);
-    await this.sender.sendTextNotice(
-      chatId,
+    await replyNotice(
       '✅ Model Set',
       `Session model set to \`${newModel}\` on engine \`${activeEngine}\`. It will take effect on the next message.`,
       'green',
