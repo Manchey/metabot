@@ -35,10 +35,14 @@ export class CommandHandler {
     const { text } = msg;
     if (!text.startsWith('/')) return false;
 
-    const { userId, chatId, messageId } = msg;
+    const { userId, chatId, messageId, rootId } = msg;
     const [cmd] = text.split(/\s+/);
 
     this.audit.log({ event: 'command', botName: this.config.name, chatId, userId, prompt: cmd });
+
+    // Compute sessionKey for thread-aware session management
+    const threadKey = rootId || messageId;
+    const sessionKey = `${chatId}:${threadKey}`;
 
     // Use thread reply if available (for Feishu)
     const replyNotice: ReplyNotice = async (title, content, color) => {
@@ -78,15 +82,15 @@ export class CommandHandler {
         return true;
 
       case '/reset':
-        this.sessionManager.resetSession(chatId);
+        this.sessionManager.resetSession(sessionKey);
         await replyNotice('✅ Session Reset', 'Conversation cleared. Working directory preserved.', 'green');
         return true;
 
       case '/stop': {
-        const task = this.getRunningTask(chatId);
+        const task = this.getRunningTask(sessionKey);
         if (task) {
           this.audit.log({ event: 'task_stopped', botName: this.config.name, chatId, userId, durationMs: Date.now() - task.startTime });
-          this.stopTask(chatId);
+          this.stopTask(sessionKey);
           await replyNotice('🛑 Stopped', 'Current task has been aborted.', 'orange');
         } else {
           await replyNotice('ℹ️ No Running Task', 'There is no task to stop.', 'blue');
@@ -95,8 +99,8 @@ export class CommandHandler {
       }
 
       case '/status': {
-        const session = this.sessionManager.getSession(chatId);
-        const isRunning = !!this.getRunningTask(chatId);
+        const session = this.sessionManager.getSession(sessionKey);
+        const isRunning = !!this.getRunningTask(sessionKey);
         const botEngine = resolveEngineName(this.config);
         const activeEngine = session.engine ?? botEngine;
         const defaultModel = this.defaultModelForEngine(activeEngine) || '_default_';
@@ -114,19 +118,19 @@ export class CommandHandler {
 
       case '/memory': {
         const args = text.slice('/memory'.length).trim();
-        await this.handleMemoryCommand(chatId, args, replyNotice);
+        await this.handleMemoryCommand(sessionKey, args, replyNotice);
         return true;
       }
 
       case '/sync': {
         const args = text.slice('/sync'.length).trim();
-        await this.handleSyncCommand(chatId, args, replyNotice);
+        await this.handleSyncCommand(sessionKey, args, replyNotice);
         return true;
       }
 
       case '/model': {
         const args = text.slice('/model'.length).trim();
-        await this.handleModelCommand(chatId, args, replyNotice);
+        await this.handleModelCommand(sessionKey, args, replyNotice);
         return true;
       }
 
@@ -136,7 +140,7 @@ export class CommandHandler {
     }
   }
 
-  private async handleMemoryCommand(chatId: string, args: string, replyNotice: ReplyNotice): Promise<void> {
+  private async handleMemoryCommand(sessionKey: string, args: string, replyNotice: ReplyNotice): Promise<void> {
     const [subCmd, ...rest] = args.split(/\s+/);
 
     if (!subCmd) {
@@ -179,12 +183,12 @@ export class CommandHandler {
           await replyNotice('📝 Memory', `Unknown sub-command: \`${subCmd}\`\nUse \`/memory\` for help.`, 'orange');
       }
     } catch (err: any) {
-      this.logger.error({ err, chatId }, 'Memory command error');
+      this.logger.error({ err, sessionKey }, 'Memory command error');
       await replyNotice('❌ Memory Error', `Failed to connect to memory server: ${err.message}`, 'red');
     }
   }
 
-  private async handleSyncCommand(chatId: string, args: string, replyNotice: ReplyNotice): Promise<void> {
+  private async handleSyncCommand(sessionKey: string, args: string, replyNotice: ReplyNotice): Promise<void> {
     if (!this.docSync) {
       await replyNotice('❌ Sync Unavailable', 'Wiki sync is not configured for this bot.', 'red');
       return;
@@ -222,7 +226,7 @@ export class CommandHandler {
         const color = result.errors.length > 0 ? 'orange' : 'green';
         await replyNotice('✅ Sync Complete', lines.join('\n'), color);
       } catch (err: any) {
-        this.logger.error({ err, chatId }, 'Sync command error');
+        this.logger.error({ err, sessionKey }, 'Sync command error');
         await replyNotice('❌ Sync Failed', err.message, 'red');
       }
       return;
@@ -245,8 +249,8 @@ export class CommandHandler {
     }
   }
 
-  private async handleModelCommand(chatId: string, args: string, replyNotice: ReplyNotice): Promise<void> {
-    const session = this.sessionManager.getSession(chatId);
+  private async handleModelCommand(sessionKey: string, args: string, replyNotice: ReplyNotice): Promise<void> {
+    const session = this.sessionManager.getSession(sessionKey);
     const botEngine = resolveEngineName(this.config);
     const activeEngine = session.engine ?? botEngine;
     const botDefault = this.defaultModelForEngine(activeEngine);
@@ -282,7 +286,7 @@ export class CommandHandler {
         );
         return;
       }
-      this.sessionManager.setSessionEngine(chatId, normalized);
+      this.sessionManager.setSessionEngine(sessionKey, normalized);
       await replyNotice(
         `✅ Engine switched to ${normalized}`,
         [
@@ -350,8 +354,8 @@ export class CommandHandler {
 
     // Reset — clear overrides (both engine AND model)
     if (normalized === 'reset' || normalized === 'clear' || normalized === 'default') {
-      this.sessionManager.setSessionModel(chatId, undefined);
-      this.sessionManager.setSessionEngine(chatId, undefined);
+      this.sessionManager.setSessionModel(sessionKey, undefined);
+      this.sessionManager.setSessionEngine(sessionKey, undefined);
       const fallback = botDefault || '_default_';
       await replyNotice(
         '✅ Overrides Cleared',
@@ -363,7 +367,7 @@ export class CommandHandler {
 
     // Set the model (use only the first token, ignore trailing junk)
     const newModel = args.split(/\s+/)[0];
-    this.sessionManager.setSessionModel(chatId, newModel);
+    this.sessionManager.setSessionModel(sessionKey, newModel);
     await replyNotice(
       '✅ Model Set',
       `Session model set to \`${newModel}\` on engine \`${activeEngine}\`. It will take effect on the next message.`,
