@@ -367,7 +367,7 @@ export class CommandHandler {
 
     // Set the model (use only the first token, ignore trailing junk)
     const newModel = args.split(/\s+/)[0];
-    this.sessionManager.setSessionModel(sessionKey, newModel);
+this.sessionManager.setSessionModel(sessionKey, newModel, activeEngine);
     await replyNotice(
       '✅ Model Set',
       `Session model set to \`${newModel}\` on engine \`${activeEngine}\`. It will take effect on the next message.`,
