@@ -20,7 +20,8 @@ import type { SessionRegistry } from '../session/session-registry.js';
 
 const TASK_TIMEOUT_MS = 24 * 60 * 60 * 1000; // 24 hours
 const QUESTION_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes for user to answer
-const MAX_QUEUE_SIZE = 5; // max queued messages per chat
+const MAX_QUEUE_SIZE = 5; // max queued messages per thread
+const DEFAULT_MAX_CONCURRENT_PER_CHAT = 3; // max parallel tasks per chatId
 const IDLE_TIMEOUT_MS = 60 * 60 * 1000; // 1 hour idle → abort
 const FINAL_CARD_RETRIES = 3;
 const FINAL_CARD_BASE_DELAY_MS = 2000;
@@ -114,9 +115,9 @@ export class MessageBridge {
   private outputHandler: OutputHandler;
   readonly costTracker: CostTracker;
   private sessionRegistry?: SessionRegistry;
-  private runningTasks = new Map<string, RunningTask>(); // keyed by chatId
-  private messageQueues = new Map<string, IncomingMessage[]>(); // per-chatId message queue
-  private pendingBatches = new Map<string, PendingBatch>(); // media debounce batches
+  private runningTasks = new Map<string, RunningTask>(); // keyed by sessionKey (chatId:threadKey)
+  private messageQueues = new Map<string, IncomingMessage[]>(); // per-sessionKey message queue
+  private pendingBatches = new Map<string, PendingBatch>(); // per-sessionKey media debounce batches
   /** Callback for activity lifecycle events (task started/completed/failed). */
   onActivityEvent?: (event: ActivityEventData) => void;
 
@@ -140,8 +141,8 @@ export class MessageBridge {
 
     this.commandHandler = new CommandHandler(
       config, logger, sender, this.sessionManager, memoryClient, this.audit,
-      (chatId) => this.runningTasks.get(chatId),
-      (chatId) => this.stopTask(chatId),
+      (sessionKey) => this.runningTasks.get(sessionKey),
+      (sessionKey) => this.stopTask(sessionKey),
     );
 
     this.outputHandler = new OutputHandler(logger, sender, this.outputsManager);
@@ -218,12 +219,23 @@ export class MessageBridge {
     return this.sessionManager;
   }
 
+  /** Count how many running tasks belong to a given chatId. */
+  private concurrentCountForChat(chatId: string): number {
+    let count = 0;
+    for (const task of this.runningTasks.values()) {
+      if (task.chatId === chatId) count++;
+    }
+    return count;
+  }
+
+  /** Max concurrent tasks allowed per chatId (from config, default 3). */
+  private maxConcurrentForChat(): number {
+    return this.config.maxConcurrentTasks ?? DEFAULT_MAX_CONCURRENT_PER_CHAT;
+  }
+
   isBusy(chatId: string): boolean {
     // Check if any task is running for this chat (sessionKey format: chatId:threadKey)
-    for (const [sessionKey, task] of this.runningTasks) {
-      if (task.chatId === chatId) return true;
-    }
-    return false;
+    return this.concurrentCountForChat(chatId) > 0;
   }
 
   /** Return info about all currently running tasks (for team status display). */
@@ -258,18 +270,18 @@ export class MessageBridge {
     // before the old loop exits, the old finally block would delete the NEW task entry.
   }
 
-  private processQueue(chatId: string): void {
-    const queue = this.messageQueues.get(chatId);
+  private processQueue(sessionKey: string): void {
+    const queue = this.messageQueues.get(sessionKey);
     if (!queue || queue.length === 0) {
-      this.messageQueues.delete(chatId);
+      this.messageQueues.delete(sessionKey);
       return;
     }
     const next = queue.shift()!;
     if (queue.length === 0) {
-      this.messageQueues.delete(chatId);
+      this.messageQueues.delete(sessionKey);
     }
     this.executeQuery(next).catch((err) => {
-      this.logger.error({ err, chatId }, 'Error processing queued message');
+      this.logger.error({ err, sessionKey }, 'Error processing queued message');
     });
   }
 
@@ -286,12 +298,15 @@ export class MessageBridge {
     value: Record<string, unknown>;
   }): Promise<void> {
     const { chatId, userId, messageId, value } = event;
-    // Find task by chatId (sessionKey format: chatId:threadKey, so we need to search)
+    // Find task by chatId — if multiple threads are running, check all tasks
+    // and match the one with a pending question that matches this card action
     let task: RunningTask | undefined;
     for (const [key, t] of this.runningTasks) {
-      if (t.chatId === chatId) {
+      if (t.chatId === chatId && t.pendingQuestion) {
         task = t;
-        break;
+        // If there are multiple pending questions across threads, prefer the one
+        // whose toolUseId matches the card action value
+        if (value.toolUseId && t.pendingQuestion.toolUseId === value.toolUseId) break;
       }
     }
     if (!task || !task.pendingQuestion) {
@@ -343,7 +358,17 @@ export class MessageBridge {
         await this.sender.sendTextNotice(
           chatId,
           '⏳ Task In Progress',
-          'You have a running task. Use `/stop` to abort it, or wait for it to finish.',
+          'This thread has a running task. Use `/stop` to abort it, or wait for it to finish.',
+          'orange',
+        );
+        return;
+      }
+      // Check chat-level concurrency limit
+      if (this.concurrentCountForChat(chatId) >= this.maxConcurrentForChat()) {
+        await this.sender.sendTextNotice(
+          chatId,
+          '⏳ Chat Busy',
+          `This chat already has ${this.concurrentCountForChat(chatId)} tasks running (max: ${this.maxConcurrentForChat()}). Use \`/stop\` to abort one, or wait.`,
           'orange',
         );
         return;
@@ -352,76 +377,87 @@ export class MessageBridge {
       return;
     }
 
-    // Check if there's a pending question waiting for an answer
+    // Check if there's a pending question waiting for an answer in this thread
     const task = this.runningTasks.get(sessionKey);
     if (task && task.pendingQuestion) {
       await this.handleAnswer(msg, task);
       return;
     }
 
-    // If a task is running, queue the message instead of rejecting
+    // If this thread already has a running task, queue within the thread
     if (this.runningTasks.has(sessionKey)) {
       // If there's a pending batch and this is a text message, merge batch into the queued text
-      const batch = this.pendingBatches.get(chatId);
+      const batch = this.pendingBatches.get(sessionKey);
       if (batch && !this.isDefaultMediaText(msg)) {
         clearTimeout(batch.timerId);
-        this.pendingBatches.delete(chatId);
+        this.pendingBatches.delete(sessionKey);
         const merged = this.mergeBatchWithText(batch.messages, msg);
         msg = merged;
       } else if (batch && this.isDefaultMediaText(msg)) {
         // Another media message while task is running — just add to batch
         batch.messages.push(msg);
         clearTimeout(batch.timerId);
-        batch.timerId = setTimeout(() => this.flushBatch(chatId), BATCH_DEBOUNCE_MS);
+        batch.timerId = setTimeout(() => this.flushBatch(sessionKey), BATCH_DEBOUNCE_MS);
         return;
       }
 
-      const queue = this.messageQueues.get(chatId) || [];
+      const queue = this.messageQueues.get(sessionKey) || [];
       if (queue.length >= MAX_QUEUE_SIZE) {
         await this.sender.sendTextNotice(
           chatId,
           '⏳ Queue Full',
-          `Queue is full (${MAX_QUEUE_SIZE} pending). Use \`/stop\` to abort the current task, or wait.`,
+          `Queue is full (${MAX_QUEUE_SIZE} pending) for this thread. Use \`/stop\` to abort the current task, or wait.`,
           'orange',
         );
         return;
       }
       queue.push(msg);
-      this.messageQueues.set(chatId, queue);
-      this.audit.log({ event: 'task_queued', botName: this.config.name, chatId, userId: msg.userId, prompt: msg.text, meta: { position: queue.length } });
+      this.messageQueues.set(sessionKey, queue);
+      this.audit.log({ event: 'task_queued', botName: this.config.name, chatId, userId: msg.userId, prompt: msg.text, meta: { position: queue.length, sessionKey } });
       await this.sender.sendTextNotice(
         chatId,
         '📋 Queued',
-        `Your message has been queued (position #${queue.length}). It will run after the current task finishes.`,
+        `Your message has been queued (position #${queue.length}) in this thread. It will run after the current task finishes.`,
         'blue',
+      );
+      return;
+    }
+
+    // This thread has no running task — check chat-level concurrency limit
+    if (this.concurrentCountForChat(chatId) >= this.maxConcurrentForChat()) {
+      await this.sender.sendTextNotice(
+        chatId,
+        '⏳ Chat Busy',
+        `This chat already has ${this.concurrentCountForChat(chatId)} tasks running (max: ${this.maxConcurrentForChat()}). Use \`/stop\` to abort one, or wait for a task to finish.`,
+        'orange',
       );
       return;
     }
 
     // Smart debounce: batch media-only messages, execute text immediately
     const isMediaOnly = this.isDefaultMediaText(msg);
-    const batch = this.pendingBatches.get(chatId);
+    const batch = this.pendingBatches.get(sessionKey);
 
     if (isMediaOnly) {
       // Media message: add to batch and wait for more
       if (batch) {
         batch.messages.push(msg);
         clearTimeout(batch.timerId);
-        batch.timerId = setTimeout(() => this.flushBatch(chatId), BATCH_DEBOUNCE_MS);
+        batch.timerId = setTimeout(() => this.flushBatch(sessionKey), BATCH_DEBOUNCE_MS);
       } else {
-        const timerId = setTimeout(() => this.flushBatch(chatId), BATCH_DEBOUNCE_MS);
-        this.pendingBatches.set(chatId, { messages: [msg], timerId });
+        const timerId = setTimeout(() => this.flushBatch(sessionKey), BATCH_DEBOUNCE_MS);
+        this.pendingBatches.set(sessionKey, { messages: [msg], timerId });
       }
-      this.logger.info({ chatId, imageKey: msg.imageKey, fileKey: msg.fileKey }, 'Media message batched, waiting for more');
+      this.logger.info({ chatId, sessionKey, imageKey: msg.imageKey, fileKey: msg.fileKey }, 'Media message batched, waiting for more');
       return;
     }
 
     // Text message: if pending batch exists, merge and execute immediately
     if (batch) {
       clearTimeout(batch.timerId);
-      this.pendingBatches.delete(chatId);
+      this.pendingBatches.delete(sessionKey);
       const merged = this.mergeBatchWithText(batch.messages, msg);
-      this.logger.info({ chatId, batchSize: batch.messages.length }, 'Flushing media batch with text message');
+      this.logger.info({ chatId, sessionKey, batchSize: batch.messages.length }, 'Flushing media batch with text message');
       await this.executeQuery(merged);
       return;
     }
@@ -583,32 +619,45 @@ export class MessageBridge {
   }
 
   /** Timer expired: merge batched media messages and execute. */
-  private flushBatch(chatId: string): void {
-    const batch = this.pendingBatches.get(chatId);
+  private flushBatch(sessionKey: string): void {
+    const batch = this.pendingBatches.get(sessionKey);
     if (!batch) return;
-    this.pendingBatches.delete(chatId);
+    this.pendingBatches.delete(sessionKey);
 
     const merged = this.mergeBatchMessages(batch.messages);
-    this.logger.info({ chatId, batchSize: batch.messages.length }, 'Flushing media batch (timeout)');
+    const chatId = sessionKey.split(':')[0];
+    this.logger.info({ chatId, sessionKey, batchSize: batch.messages.length }, 'Flushing media batch (timeout)');
 
     // Compute sessionKey from the merged message for thread-aware task check
     const threadKey = merged.rootId || merged.messageId;
-    const sessionKey = `${chatId}:${threadKey}`;
+    const effectiveSessionKey = `${chatId}:${threadKey}`;
 
     // If a task started running during the debounce window, queue instead
-    if (this.runningTasks.has(sessionKey)) {
-      const queue = this.messageQueues.get(chatId) || [];
+    if (this.runningTasks.has(effectiveSessionKey)) {
+      const queue = this.messageQueues.get(effectiveSessionKey) || [];
       if (queue.length < MAX_QUEUE_SIZE) {
         queue.push(merged);
-        this.messageQueues.set(chatId, queue);
+        this.messageQueues.set(effectiveSessionKey, queue);
         this.sender.sendTextNotice(chatId, '📋 Queued', `Your ${batch.messages.length} media message(s) have been queued.`, 'blue')
           .catch(() => {});
       }
       return;
     }
 
+    // Check chat-level concurrency limit before starting a new task
+    if (this.concurrentCountForChat(chatId) >= this.maxConcurrentForChat()) {
+      const queue = this.messageQueues.get(effectiveSessionKey) || [];
+      if (queue.length < MAX_QUEUE_SIZE) {
+        queue.push(merged);
+        this.messageQueues.set(effectiveSessionKey, queue);
+        this.sender.sendTextNotice(chatId, '⏳ Chat Busy', `Chat already has ${this.concurrentCountForChat(chatId)} tasks running. Media queued.`, 'orange')
+          .catch(() => {});
+      }
+      return;
+    }
+
     this.executeQuery(merged).catch(err => {
-      this.logger.error({ err, chatId }, 'Error executing batched messages');
+      this.logger.error({ err, chatId, sessionKey }, 'Error executing batched messages');
     });
   }
 
@@ -1122,8 +1171,15 @@ if (newSid) this.sessionManager.setSessionId(sessionKey, newSid, engineName);
   async executeApiTask(options: ApiTaskOptions): Promise<ApiTaskResult> {
     const { prompt, chatId, userId = 'api', sendCards = false } = options;
 
-    if (this.runningTasks.has(chatId)) {
-      return { success: false, responseText: '', error: 'Chat is busy with another task' };
+    // API tasks use chatId as sessionKey (no thread context)
+    const sessionKey = chatId;
+
+    if (this.runningTasks.has(sessionKey)) {
+      return { success: false, responseText: '', error: 'This API session already has a running task' };
+    }
+
+    if (this.concurrentCountForChat(chatId) >= this.maxConcurrentForChat()) {
+      return { success: false, responseText: '', error: `Chat already has ${this.concurrentCountForChat(chatId)} tasks running (max: ${this.maxConcurrentForChat()})` };
     }
 
     const { session, engineName } = this.prepareSessionForExecution(chatId);

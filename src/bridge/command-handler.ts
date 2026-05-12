@@ -21,8 +21,8 @@ export class CommandHandler {
     private sessionManager: SessionManager,
     private memoryClient: MemoryClient,
     private audit: AuditLogger,
-    private getRunningTask: (chatId: string) => { startTime: number } | undefined,
-    private stopTask: (chatId: string) => void,
+    private getRunningTask: (sessionKey: string) => { startTime: number } | undefined,
+    private stopTask: (sessionKey: string) => void,
   ) {}
 
   /** Set the doc sync service (optional, only available for Feishu bots). */
