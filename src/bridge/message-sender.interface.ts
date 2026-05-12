@@ -8,14 +8,23 @@ export interface IMessageSender {
   /** Send a new streaming card/message for a CardState. Returns messageId for subsequent updates. */
   sendCard(chatId: string, state: CardState): Promise<string | undefined>;
 
+  /** Reply to a message with a card, optionally in a thread. Returns messageId for subsequent updates. */
+  replyCard?(messageId: string, state: CardState, replyInThread: boolean): Promise<string | undefined>;
+
   /** Update an existing streaming card/message with new CardState. Returns false on failure. */
   updateCard(messageId: string, state: CardState): Promise<boolean>;
 
   /** Send a simple notice message (for command responses: /help, /reset, /stop, etc.). */
   sendTextNotice(chatId: string, title: string, content: string, color?: string): Promise<void>;
 
+  /** Reply to a message with a notice card, optionally in a thread. */
+  replyTextNotice?(messageId: string, title: string, content: string, color?: string, replyInThread?: boolean): Promise<void>;
+
   /** Send a plain text message. */
   sendText(chatId: string, text: string): Promise<void>;
+
+  /** Reply to a message with plain text, optionally in a thread. */
+  replyText?(messageId: string, text: string, replyInThread?: boolean): Promise<void>;
 
   /** Send a local image file to the chat. */
   sendImageFile(chatId: string, filePath: string): Promise<boolean>;

@@ -142,6 +142,18 @@ export function createEventDispatcher(
         const chatType = message.chat_type;
         const messageId = message.message_id;
 
+        // Extract thread info for topic-based conversation continuity
+        // thread_id: topic token (omt_xxx) - only present when message is in a thread
+        // root_id: root message ID (om_xxx) - the message that started the thread
+        // For session continuity, we use root_id as the thread key so first message and
+        // subsequent thread replies share the same session (root_id == first msg's messageId)
+        const threadId = message.thread_id;
+        const rootId = message.root_id;
+        const parentMessageId = message.parent_id;
+
+        // Log thread info for debugging
+        logger.debug({ messageId, threadId, rootId, parentMessageId }, 'Message thread info');
+
         // In group chats, only respond when the bot is @mentioned
         // Exceptions: 2-member groups are treated like DMs; groupNoMention mode skips @mention check
         const mentions = message.mentions;
@@ -282,7 +294,14 @@ export function createEventDispatcher(
           }
         }
 
-        onMessage({ messageId, chatId, chatType, userId, text, imageKey, fileKey, fileName, extraMedia });
+        // Add reaction to indicate message received (e.g., "OK" = ✅)
+        if (messageSender) {
+          messageSender.addReaction(messageId, 'OK').catch((err) => {
+            logger.warn({ err, messageId }, 'Failed to add reaction (non-critical)');
+          });
+        }
+
+        onMessage({ messageId, chatId, chatType, userId, text, imageKey, fileKey, fileName, extraMedia, threadId, rootId, parentMessageId });
       } catch (err) {
         logger.error({ err }, 'Error handling message event');
       }

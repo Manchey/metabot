@@ -30,6 +30,36 @@ export class MessageSender {
     }
   }
 
+  /**
+   * Reply to a message with a card, optionally in a thread.
+   * @param messageId - The message ID to reply to
+   * @param cardContent - The card JSON content
+   * @param replyInThread - If true, reply appears in the message's thread instead of main chat
+   * @returns The new message ID if successful
+   */
+  async replyCard(messageId: string, cardContent: string, replyInThread: boolean = false): Promise<string | undefined> {
+    try {
+      const resp = await this.client.im.v1.message.reply({
+        path: { message_id: messageId },
+        data: {
+          content: cardContent,
+          msg_type: 'interactive',
+          reply_in_thread: replyInThread,
+        },
+      });
+
+      const newMessageId = resp?.data?.message_id;
+      if (!newMessageId) {
+        this.logger.error({ resp }, 'Failed to get message_id from reply response');
+      }
+      this.logger.info({ messageId, newMessageId, replyInThread }, 'Card reply sent');
+      return newMessageId;
+    } catch (err) {
+      this.logger.error({ err, messageId, replyInThread }, 'Failed to reply card');
+      return undefined;
+    }
+  }
+
   async updateCard(messageId: string, cardContent: string): Promise<boolean> {
     try {
       await this.client.im.v1.message.patch({
@@ -194,6 +224,50 @@ export class MessageSender {
       });
     } catch (err) {
       this.logger.error({ err, chatId }, 'Failed to send text');
+    }
+  }
+
+  /**
+   * Reply to a message with text, optionally in a thread.
+   * @param messageId - The message ID to reply to
+   * @param text - The text content
+   * @param replyInThread - If true, reply appears in the message's thread instead of main chat
+   */
+  async replyText(messageId: string, text: string, replyInThread: boolean = false): Promise<void> {
+    try {
+      await this.client.im.v1.message.reply({
+        path: { message_id: messageId },
+        data: {
+          content: JSON.stringify({ text }),
+          msg_type: 'text',
+          reply_in_thread: replyInThread,
+        },
+      });
+      this.logger.info({ messageId, replyInThread }, 'Text reply sent');
+    } catch (err) {
+      this.logger.error({ err, messageId, replyInThread }, 'Failed to reply text');
+    }
+  }
+
+  /**
+   * Add an emoji reaction to a message.
+   * @param messageId - The message ID to add reaction to
+   * @param emojiType - Emoji type, e.g. "OK", "DONE", "THUMBSUP", "HEART"
+   * @returns true if successful, false otherwise
+   */
+  async addReaction(messageId: string, emojiType: string): Promise<boolean> {
+    try {
+      await this.client.im.v1.messageReaction.create({
+        path: { message_id: messageId },
+        data: {
+          reaction_type: { emoji_type: emojiType },
+        },
+      });
+      this.logger.info({ messageId, emojiType }, 'Reaction added to message');
+      return true;
+    } catch (err) {
+      this.logger.error({ err, messageId, emojiType }, 'Failed to add reaction');
+      return false;
     }
   }
 }

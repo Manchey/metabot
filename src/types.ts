@@ -65,4 +65,10 @@ export interface IncomingMessage {
     fileKey?: string;
     fileName?: string;
   }>;
+  /** Thread ID if this message is in a thread (话题回复). Used to continue conversation in the same thread. */
+  threadId?: string;
+  /** Root message ID - the message that started the thread. Used as session key for thread continuity. */
+  rootId?: string;
+  /** Parent message ID (the immediate parent in thread hierarchy). */
+  parentMessageId?: string;
 }

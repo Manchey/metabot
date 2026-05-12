@@ -20,7 +20,8 @@ import type { SessionRegistry } from '../session/session-registry.js';
 
 const TASK_TIMEOUT_MS = 24 * 60 * 60 * 1000; // 24 hours
 const QUESTION_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes for user to answer
-const MAX_QUEUE_SIZE = 5; // max queued messages per chat
+const MAX_QUEUE_SIZE = 5; // max queued messages per thread
+const DEFAULT_MAX_CONCURRENT_PER_CHAT = 3; // max parallel tasks per chatId
 const IDLE_TIMEOUT_MS = 60 * 60 * 1000; // 1 hour idle → abort
 const FINAL_CARD_RETRIES = 3;
 const FINAL_CARD_BASE_DELAY_MS = 2000;
@@ -49,6 +50,12 @@ interface RunningTask {
   processor: StreamProcessor;
   rateLimiter: RateLimiter;
   chatId: string;
+  /** Session key for thread-aware session management (format: chatId:threadKey) */
+  sessionKey: string;
+  /** Thread ID for topic-based conversation continuity */
+  threadId?: string;
+  /** The user's original message ID that started/continues the thread */
+  userMessageId: string;
 }
 
 export interface ApiTaskOptions {
@@ -108,9 +115,9 @@ export class MessageBridge {
   private outputHandler: OutputHandler;
   readonly costTracker: CostTracker;
   private sessionRegistry?: SessionRegistry;
-  private runningTasks = new Map<string, RunningTask>(); // keyed by chatId
-  private messageQueues = new Map<string, IncomingMessage[]>(); // per-chatId message queue
-  private pendingBatches = new Map<string, PendingBatch>(); // media debounce batches
+  private runningTasks = new Map<string, RunningTask>(); // keyed by sessionKey (chatId:threadKey)
+  private messageQueues = new Map<string, IncomingMessage[]>(); // per-sessionKey message queue
+  private pendingBatches = new Map<string, PendingBatch>(); // per-sessionKey media debounce batches
   /** Callback for activity lifecycle events (task started/completed/failed). */
   onActivityEvent?: (event: ActivityEventData) => void;
 
@@ -134,8 +141,8 @@ export class MessageBridge {
 
     this.commandHandler = new CommandHandler(
       config, logger, sender, this.sessionManager, memoryClient, this.audit,
-      (chatId) => this.runningTasks.get(chatId),
-      (chatId) => this.stopTask(chatId),
+      (sessionKey) => this.runningTasks.get(sessionKey),
+      (sessionKey) => this.stopTask(sessionKey),
     );
 
     this.outputHandler = new OutputHandler(logger, sender, this.outputsManager);
@@ -171,28 +178,28 @@ export class MessageBridge {
    * engine changes between restarts, discard the old per-chat state before the
    * next execution so another engine does not try to resume it.
    */
-  private prepareSessionForExecution(chatId: string) {
-    const session = this.sessionManager.getSession(chatId);
+  private prepareSessionForExecution(sessionKey: string) {
+    const session = this.sessionManager.getSession(sessionKey);
     const engineName: EngineName = session.engine ?? resolveEngineName(this.config);
 
     if (session.sessionId && session.sessionIdEngine && session.sessionIdEngine !== engineName) {
       this.logger.info(
-        { chatId, sessionIdEngine: session.sessionIdEngine, engine: engineName },
+        { sessionKey, sessionIdEngine: session.sessionIdEngine, engine: engineName },
         'Clearing session id from a different engine',
       );
-      this.sessionManager.resetSession(chatId);
+      this.sessionManager.resetSession(sessionKey);
     }
 
     if (session.model && session.modelEngine && session.modelEngine !== engineName) {
       this.logger.info(
-        { chatId, modelEngine: session.modelEngine, engine: engineName },
+        { sessionKey, modelEngine: session.modelEngine, engine: engineName },
         'Clearing model override from a different engine',
       );
-      this.sessionManager.setSessionModel(chatId, undefined);
+      this.sessionManager.setSessionModel(sessionKey, undefined);
     }
 
     return {
-      session: this.sessionManager.getSession(chatId),
+      session: this.sessionManager.getSession(sessionKey),
       engineName,
     };
   }
@@ -212,27 +219,48 @@ export class MessageBridge {
     return this.sessionManager;
   }
 
+  /** Count how many running tasks belong to a given chatId. */
+  private concurrentCountForChat(chatId: string): number {
+    let count = 0;
+    for (const task of this.runningTasks.values()) {
+      if (task.chatId === chatId) count++;
+    }
+    return count;
+  }
+
+  /** Max concurrent tasks allowed per chatId (from config, default 3). */
+  private maxConcurrentForChat(): number {
+    return this.config.maxConcurrentTasks ?? DEFAULT_MAX_CONCURRENT_PER_CHAT;
+  }
+
   isBusy(chatId: string): boolean {
-    return this.runningTasks.has(chatId);
+    // Check if any task is running for this chat (sessionKey format: chatId:threadKey)
+    return this.concurrentCountForChat(chatId) > 0;
   }
 
   /** Return info about all currently running tasks (for team status display). */
   getRunningTasksInfo(): Array<{ chatId: string; startTime: number }> {
-    return Array.from(this.runningTasks.entries()).map(([chatId, task]) => ({
-      chatId,
+    return Array.from(this.runningTasks.entries()).map(([sessionKey, task]) => ({
+      chatId: task.chatId,
       startTime: task.startTime,
     }));
   }
 
-  /** Stop a running task for the given chatId. Returns true if a task was stopped. */
+  /** Stop all running tasks for the given chatId (across all threads). Returns true if any task was stopped. */
   stopChatTask(chatId: string): boolean {
-    if (!this.runningTasks.has(chatId)) return false;
-    this.stopTask(chatId);
-    return true;
+    // Find all tasks for this chat (sessionKey format: chatId:threadKey)
+    let stoppedAny = false;
+    for (const [sessionKey, task] of this.runningTasks) {
+      if (task.chatId === chatId) {
+        this.stopTask(sessionKey);
+        stoppedAny = true;
+      }
+    }
+    return stoppedAny;
   }
 
-  private stopTask(chatId: string): void {
-    const task = this.runningTasks.get(chatId);
+  private stopTask(sessionKey: string): void {
+    const task = this.runningTasks.get(sessionKey);
     if (!task) return;
     if (task.questionTimeoutId) clearTimeout(task.questionTimeoutId);
     task.executionHandle.finish();
@@ -242,18 +270,18 @@ export class MessageBridge {
     // before the old loop exits, the old finally block would delete the NEW task entry.
   }
 
-  private processQueue(chatId: string): void {
-    const queue = this.messageQueues.get(chatId);
+  private processQueue(sessionKey: string): void {
+    const queue = this.messageQueues.get(sessionKey);
     if (!queue || queue.length === 0) {
-      this.messageQueues.delete(chatId);
+      this.messageQueues.delete(sessionKey);
       return;
     }
     const next = queue.shift()!;
     if (queue.length === 0) {
-      this.messageQueues.delete(chatId);
+      this.messageQueues.delete(sessionKey);
     }
     this.executeQuery(next).catch((err) => {
-      this.logger.error({ err, chatId }, 'Error processing queued message');
+      this.logger.error({ err, sessionKey }, 'Error processing queued message');
     });
   }
 
@@ -270,7 +298,17 @@ export class MessageBridge {
     value: Record<string, unknown>;
   }): Promise<void> {
     const { chatId, userId, messageId, value } = event;
-    const task = this.runningTasks.get(chatId);
+    // Find task by chatId — if multiple threads are running, check all tasks
+    // and match the one with a pending question that matches this card action
+    let task: RunningTask | undefined;
+    for (const [key, t] of this.runningTasks) {
+      if (t.chatId === chatId && t.pendingQuestion) {
+        task = t;
+        // If there are multiple pending questions across threads, prefer the one
+        // whose toolUseId matches the card action value
+        if (value.toolUseId && t.pendingQuestion.toolUseId === value.toolUseId) break;
+      }
+    }
     if (!task || !task.pendingQuestion) {
       this.logger.debug({ chatId, userId }, 'Card action but no pending question — ignoring');
       return;
@@ -304,7 +342,11 @@ export class MessageBridge {
   }
 
   async handleMessage(msg: IncomingMessage): Promise<void> {
-    const { chatId, text } = msg;
+    const { chatId, text, rootId, messageId } = msg;
+
+    // Compute sessionKey for thread-aware session management
+    const threadKey = rootId || messageId;
+    const sessionKey = `${chatId}:${threadKey}`;
 
     // Handle commands (always allowed, even during pending questions)
     if (text.startsWith('/')) {
@@ -312,11 +354,21 @@ export class MessageBridge {
       if (handled) return;
 
       // Unrecognized /xxx command — pass through to Claude
-      if (this.runningTasks.has(chatId)) {
+      if (this.runningTasks.has(sessionKey)) {
         await this.sender.sendTextNotice(
           chatId,
           '⏳ Task In Progress',
-          'You have a running task. Use `/stop` to abort it, or wait for it to finish.',
+          'This thread has a running task. Use `/stop` to abort it, or wait for it to finish.',
+          'orange',
+        );
+        return;
+      }
+      // Check chat-level concurrency limit
+      if (this.concurrentCountForChat(chatId) >= this.maxConcurrentForChat()) {
+        await this.sender.sendTextNotice(
+          chatId,
+          '⏳ Chat Busy',
+          `This chat already has ${this.concurrentCountForChat(chatId)} tasks running (max: ${this.maxConcurrentForChat()}). Use \`/stop\` to abort one, or wait.`,
           'orange',
         );
         return;
@@ -325,76 +377,87 @@ export class MessageBridge {
       return;
     }
 
-    // Check if there's a pending question waiting for an answer
-    const task = this.runningTasks.get(chatId);
+    // Check if there's a pending question waiting for an answer in this thread
+    const task = this.runningTasks.get(sessionKey);
     if (task && task.pendingQuestion) {
       await this.handleAnswer(msg, task);
       return;
     }
 
-    // If a task is running, queue the message instead of rejecting
-    if (this.runningTasks.has(chatId)) {
+    // If this thread already has a running task, queue within the thread
+    if (this.runningTasks.has(sessionKey)) {
       // If there's a pending batch and this is a text message, merge batch into the queued text
-      const batch = this.pendingBatches.get(chatId);
+      const batch = this.pendingBatches.get(sessionKey);
       if (batch && !this.isDefaultMediaText(msg)) {
         clearTimeout(batch.timerId);
-        this.pendingBatches.delete(chatId);
+        this.pendingBatches.delete(sessionKey);
         const merged = this.mergeBatchWithText(batch.messages, msg);
         msg = merged;
       } else if (batch && this.isDefaultMediaText(msg)) {
         // Another media message while task is running — just add to batch
         batch.messages.push(msg);
         clearTimeout(batch.timerId);
-        batch.timerId = setTimeout(() => this.flushBatch(chatId), BATCH_DEBOUNCE_MS);
+        batch.timerId = setTimeout(() => this.flushBatch(sessionKey), BATCH_DEBOUNCE_MS);
         return;
       }
 
-      const queue = this.messageQueues.get(chatId) || [];
+      const queue = this.messageQueues.get(sessionKey) || [];
       if (queue.length >= MAX_QUEUE_SIZE) {
         await this.sender.sendTextNotice(
           chatId,
           '⏳ Queue Full',
-          `Queue is full (${MAX_QUEUE_SIZE} pending). Use \`/stop\` to abort the current task, or wait.`,
+          `Queue is full (${MAX_QUEUE_SIZE} pending) for this thread. Use \`/stop\` to abort the current task, or wait.`,
           'orange',
         );
         return;
       }
       queue.push(msg);
-      this.messageQueues.set(chatId, queue);
-      this.audit.log({ event: 'task_queued', botName: this.config.name, chatId, userId: msg.userId, prompt: msg.text, meta: { position: queue.length } });
+      this.messageQueues.set(sessionKey, queue);
+      this.audit.log({ event: 'task_queued', botName: this.config.name, chatId, userId: msg.userId, prompt: msg.text, meta: { position: queue.length, sessionKey } });
       await this.sender.sendTextNotice(
         chatId,
         '📋 Queued',
-        `Your message has been queued (position #${queue.length}). It will run after the current task finishes.`,
+        `Your message has been queued (position #${queue.length}) in this thread. It will run after the current task finishes.`,
         'blue',
+      );
+      return;
+    }
+
+    // This thread has no running task — check chat-level concurrency limit
+    if (this.concurrentCountForChat(chatId) >= this.maxConcurrentForChat()) {
+      await this.sender.sendTextNotice(
+        chatId,
+        '⏳ Chat Busy',
+        `This chat already has ${this.concurrentCountForChat(chatId)} tasks running (max: ${this.maxConcurrentForChat()}). Use \`/stop\` to abort one, or wait for a task to finish.`,
+        'orange',
       );
       return;
     }
 
     // Smart debounce: batch media-only messages, execute text immediately
     const isMediaOnly = this.isDefaultMediaText(msg);
-    const batch = this.pendingBatches.get(chatId);
+    const batch = this.pendingBatches.get(sessionKey);
 
     if (isMediaOnly) {
       // Media message: add to batch and wait for more
       if (batch) {
         batch.messages.push(msg);
         clearTimeout(batch.timerId);
-        batch.timerId = setTimeout(() => this.flushBatch(chatId), BATCH_DEBOUNCE_MS);
+        batch.timerId = setTimeout(() => this.flushBatch(sessionKey), BATCH_DEBOUNCE_MS);
       } else {
-        const timerId = setTimeout(() => this.flushBatch(chatId), BATCH_DEBOUNCE_MS);
-        this.pendingBatches.set(chatId, { messages: [msg], timerId });
+        const timerId = setTimeout(() => this.flushBatch(sessionKey), BATCH_DEBOUNCE_MS);
+        this.pendingBatches.set(sessionKey, { messages: [msg], timerId });
       }
-      this.logger.info({ chatId, imageKey: msg.imageKey, fileKey: msg.fileKey }, 'Media message batched, waiting for more');
+      this.logger.info({ chatId, sessionKey, imageKey: msg.imageKey, fileKey: msg.fileKey }, 'Media message batched, waiting for more');
       return;
     }
 
     // Text message: if pending batch exists, merge and execute immediately
     if (batch) {
       clearTimeout(batch.timerId);
-      this.pendingBatches.delete(chatId);
+      this.pendingBatches.delete(sessionKey);
       const merged = this.mergeBatchWithText(batch.messages, msg);
-      this.logger.info({ chatId, batchSize: batch.messages.length }, 'Flushing media batch with text message');
+      this.logger.info({ chatId, sessionKey, batchSize: batch.messages.length }, 'Flushing media batch with text message');
       await this.executeQuery(merged);
       return;
     }
@@ -556,28 +619,45 @@ export class MessageBridge {
   }
 
   /** Timer expired: merge batched media messages and execute. */
-  private flushBatch(chatId: string): void {
-    const batch = this.pendingBatches.get(chatId);
+  private flushBatch(sessionKey: string): void {
+    const batch = this.pendingBatches.get(sessionKey);
     if (!batch) return;
-    this.pendingBatches.delete(chatId);
+    this.pendingBatches.delete(sessionKey);
 
     const merged = this.mergeBatchMessages(batch.messages);
-    this.logger.info({ chatId, batchSize: batch.messages.length }, 'Flushing media batch (timeout)');
+    const chatId = sessionKey.split(':')[0];
+    this.logger.info({ chatId, sessionKey, batchSize: batch.messages.length }, 'Flushing media batch (timeout)');
+
+    // Compute sessionKey from the merged message for thread-aware task check
+    const threadKey = merged.rootId || merged.messageId;
+    const effectiveSessionKey = `${chatId}:${threadKey}`;
 
     // If a task started running during the debounce window, queue instead
-    if (this.runningTasks.has(chatId)) {
-      const queue = this.messageQueues.get(chatId) || [];
+    if (this.runningTasks.has(effectiveSessionKey)) {
+      const queue = this.messageQueues.get(effectiveSessionKey) || [];
       if (queue.length < MAX_QUEUE_SIZE) {
         queue.push(merged);
-        this.messageQueues.set(chatId, queue);
+        this.messageQueues.set(effectiveSessionKey, queue);
         this.sender.sendTextNotice(chatId, '📋 Queued', `Your ${batch.messages.length} media message(s) have been queued.`, 'blue')
           .catch(() => {});
       }
       return;
     }
 
+    // Check chat-level concurrency limit before starting a new task
+    if (this.concurrentCountForChat(chatId) >= this.maxConcurrentForChat()) {
+      const queue = this.messageQueues.get(effectiveSessionKey) || [];
+      if (queue.length < MAX_QUEUE_SIZE) {
+        queue.push(merged);
+        this.messageQueues.set(effectiveSessionKey, queue);
+        this.sender.sendTextNotice(chatId, '⏳ Chat Busy', `Chat already has ${this.concurrentCountForChat(chatId)} tasks running. Media queued.`, 'orange')
+          .catch(() => {});
+      }
+      return;
+    }
+
     this.executeQuery(merged).catch(err => {
-      this.logger.error({ err, chatId }, 'Error executing batched messages');
+      this.logger.error({ err, chatId, sessionKey }, 'Error executing batched messages');
     });
   }
 
@@ -618,8 +698,19 @@ export class MessageBridge {
   }
 
   private async executeQuery(msg: IncomingMessage): Promise<void> {
-    const { userId, chatId, text, imageKey, fileKey, fileName, messageId: msgId } = msg;
-    const { session, engineName } = this.prepareSessionForExecution(chatId);
+const { userId, chatId, text, imageKey, fileKey, fileName, messageId: msgId, threadId, rootId, parentMessageId } = msg;
+
+    // Use thread-aware session key: each thread has its own conversation context
+    // Key insight: rootId is the message ID that started the thread
+    // - First conversation: rootId is empty, so use msgId (user's first message ID)
+    // - Subsequent thread replies: rootId = first user message's ID
+    // This ensures thread continuity: first message and thread replies share the same session
+    const threadKey = rootId || msgId;
+    const sessionKey = `${chatId}:${threadKey}`;
+
+    this.logger.info({ msgId, threadId, rootId, parentMessageId, threadKey, sessionKey }, 'Thread session mapping');
+
+    const { session, engineName } = this.prepareSessionForExecution(sessionKey);
     const cwd = session.workingDirectory;
     const abortController = new AbortController();
     const activeEngine = session.engine ?? resolveEngineName(this.config);
@@ -680,8 +771,8 @@ export class MessageBridge {
       }
     }
 
-    // Prepare per-chat outputs directory
-    const outputsDir = this.outputsManager.prepareDir(chatId);
+    // Prepare per-chat outputs directory (use sessionKey for thread isolation)
+    const outputsDir = this.outputsManager.prepareDir(sessionKey);
 
     // Send initial "thinking" card
     const mediaCount = 1 + (msg.extraMedia?.length || 0);
@@ -697,7 +788,16 @@ export class MessageBridge {
       toolCalls: [],
     };
 
-    const messageId = await this.sender.sendCard(chatId, initialState);
+    // Send initial card - use thread reply if supported
+    // Always reply in thread to create/continue topic-based conversation
+    let messageId: string | undefined;
+    if (this.sender.replyCard) {
+      messageId = await this.sender.replyCard(msgId, initialState, true);
+      this.logger.info({ msgId, threadKey, sessionKey }, 'Sent card as thread reply');
+    } else {
+      // Fallback for platforms without thread support
+      messageId = await this.sender.sendCard(chatId, initialState);
+    }
 
     if (!messageId) {
       this.logger.error('Failed to send initial card, aborting');
@@ -707,7 +807,7 @@ export class MessageBridge {
     const apiContext = { botName: this.config.name, chatId };
 
     // Start multi-turn execution
-    const executionHandle = this.executorForChat(chatId).startExecution({
+    const executionHandle = this.executorForChat(sessionKey).startExecution({
       prompt,
       cwd,
       sessionId: session.sessionId,
@@ -732,8 +832,11 @@ export class MessageBridge {
       processor,
       rateLimiter,
       chatId,
+      sessionKey,
+      threadId: threadKey,
+      userMessageId: msgId,
     };
-    this.runningTasks.set(chatId, runningTask);
+    this.runningTasks.set(sessionKey, runningTask);
     metrics.setGauge('metabot_active_tasks', this.runningTasks.size);
 
     this.audit.log({ event: 'task_start', botName: this.config.name, chatId, userId, prompt: text });
@@ -774,8 +877,8 @@ export class MessageBridge {
 
         // Update session ID if discovered
         const newSessionId = processor.getSessionId();
-        if (newSessionId && (newSessionId !== session.sessionId || session.sessionIdEngine !== engineName)) {
-          this.sessionManager.setSessionId(chatId, newSessionId, engineName);
+if (newSessionId && (newSessionId !== session.sessionId || session.sessionIdEngine !== engineName)) {
+          this.sessionManager.setSessionId(sessionKey, newSessionId, engineName);
         }
 
         // Check if we hit a waiting_for_input state
@@ -826,7 +929,7 @@ export class MessageBridge {
         for (const tool of sdkTools) {
           this.logger.info({ chatId, toolName: tool.name, toolUseId: tool.toolUseId }, 'Detected SDK-handled tool');
           if (tool.name === 'ExitPlanMode') {
-            await this.sendPlanContent(chatId, processor, state);
+            await this.sendPlanContent(chatId, processor, state, runningTask.userMessageId);
           }
         }
 
@@ -873,13 +976,13 @@ export class MessageBridge {
 
       // Auto-retry with fresh session when Claude can't find the conversation
       if (lastState.status === 'error' && isStaleSessionError(lastState.errorMessage) && session.sessionId) {
-        this.logger.info({ chatId }, 'Stale session detected, retrying with fresh session');
-        this.sessionManager.resetSession(chatId);
+        this.logger.info({ sessionKey }, 'Stale session detected, retrying with fresh session');
+        this.sessionManager.resetSession(sessionKey);
         lastState = { ...lastState, status: 'running', errorMessage: undefined };
         await this.sender.updateCard(messageId, { ...lastState, responseText: '_Session expired, retrying..._' });
 
         // Retry execution without sessionId
-        const retryHandle = this.executorForChat(chatId).startExecution({
+        const retryHandle = this.executorForChat(sessionKey).startExecution({
           prompt, cwd, sessionId: undefined, abortController, outputsDir, apiContext, model: session.model,
         });
         executionHandle.finish();
@@ -891,7 +994,7 @@ export class MessageBridge {
           const state = processor.processMessage(message);
           lastState = state;
           const newSid = processor.getSessionId();
-          if (newSid) this.sessionManager.setSessionId(chatId, newSid, engineName);
+if (newSid) this.sessionManager.setSessionId(sessionKey, newSid, engineName);
           if (state.status === 'complete' || state.status === 'error') break;
           rateLimiter.schedule(() => { this.sender.updateCard(messageId, state); });
         }
@@ -900,12 +1003,12 @@ export class MessageBridge {
 
       // Auto-retry with fresh session on context overflow (e.g. third-party models without compaction)
       if (lastState.status === 'error' && isContextOverflowError(lastState.errorMessage) && session.sessionId) {
-        this.logger.info({ chatId }, 'Context overflow detected, retrying with fresh session');
-        this.sessionManager.resetSession(chatId);
+        this.logger.info({ sessionKey }, 'Context overflow detected, retrying with fresh session');
+        this.sessionManager.resetSession(sessionKey);
         lastState = { ...lastState, status: 'running', errorMessage: undefined };
         await this.sender.updateCard(messageId, { ...lastState, responseText: '_Context limit reached, starting fresh session..._' });
 
-        const retryHandle = this.executorForChat(chatId).startExecution({
+        const retryHandle = this.executorForChat(sessionKey).startExecution({
           prompt, cwd, sessionId: undefined, abortController, outputsDir, apiContext, model: session.model,
         });
         executionHandle.finish();
@@ -917,14 +1020,14 @@ export class MessageBridge {
           const state = processor.processMessage(message);
           lastState = state;
           const newSid = processor.getSessionId();
-          if (newSid) this.sessionManager.setSessionId(chatId, newSid, engineName);
+if (newSid) this.sessionManager.setSessionId(sessionKey, newSid, engineName);
           if (state.status === 'complete' || state.status === 'error') break;
           rateLimiter.schedule(() => { this.sender.updateCard(messageId, state); });
         }
         await rateLimiter.cancelAndWait();
       }
 
-      await this.sendFinalCard(messageId, lastState, chatId);
+      await this.sendFinalCard(messageId, lastState, sessionKey);
 
       // Audit + cost tracking
       const durationMs = Date.now() - startTime;
@@ -950,11 +1053,11 @@ export class MessageBridge {
       metrics.observeHistogram('metabot_task_duration_seconds', durationMs / 1000);
       if (lastState.costUsd) metrics.observeHistogram('metabot_task_cost_usd', lastState.costUsd);
 
-      // Record in cross-platform session registry
-      this.recordSession(chatId, displayPrompt, lastState.responseText, processor.getSessionId(), lastState.costUsd, durationMs);
+      // Record in cross-platform session registry (use chatId for discovery, but sessionKey for sessionManager)
+      this.recordSession(sessionKey, displayPrompt, lastState.responseText, processor.getSessionId(), lastState.costUsd, durationMs);
 
       // Send completion notification for long-running tasks (>10s) so user gets a Feishu push
-      await this.sendCompletionNotice(chatId, lastState, durationMs);
+      await this.sendCompletionNotice(chatId, lastState, durationMs, runningTask.userMessageId);
 
       // Send any output files produced by Claude
       await this.outputHandler.sendOutputFiles(chatId, outputsDir, processor, lastState);
@@ -965,13 +1068,13 @@ export class MessageBridge {
       const errMsg: string = err.message || '';
       if ((isStaleSessionError(errMsg) || isContextOverflowError(errMsg)) && session.sessionId) {
         const isOverflow = isContextOverflowError(errMsg);
-        this.logger.info({ chatId, isOverflow }, isOverflow ? 'Context overflow in catch, retrying with fresh session' : 'Stale session detected in catch, retrying with fresh session');
-        this.sessionManager.resetSession(chatId);
+        this.logger.info({ sessionKey, isOverflow }, isOverflow ? 'Context overflow in catch, retrying with fresh session' : 'Stale session detected in catch, retrying with fresh session');
+        this.sessionManager.resetSession(sessionKey);
         const retryMsg = isOverflow ? '_Context limit reached, starting fresh session..._' : '_Session expired, retrying..._';
         await this.sender.updateCard(messageId, { ...lastState, status: 'running', responseText: retryMsg });
 
         try {
-          const retryHandle = this.executorForChat(chatId).startExecution({
+          const retryHandle = this.executorForChat(sessionKey).startExecution({
             prompt, cwd, sessionId: undefined, abortController, outputsDir, apiContext, model: session.model,
           });
           executionHandle.finish();
@@ -983,12 +1086,12 @@ export class MessageBridge {
             const state = processor.processMessage(message);
             lastState = state;
             const newSid = processor.getSessionId();
-            if (newSid) this.sessionManager.setSessionId(chatId, newSid, engineName);
+if (newSid) this.sessionManager.setSessionId(sessionKey, newSid, engineName);
             if (state.status === 'complete' || state.status === 'error') break;
             rateLimiter.schedule(() => { this.sender.updateCard(messageId, state); });
           }
           await rateLimiter.cancelAndWait();
-          await this.sendFinalCard(messageId, lastState, chatId);
+          await this.sendFinalCard(messageId, lastState, sessionKey);
 
           const durationMs = Date.now() - startTime;
           this.audit.log({
@@ -1007,7 +1110,7 @@ export class MessageBridge {
           metrics.incCounter('metabot_tasks_total');
           metrics.incCounter('metabot_tasks_by_status', lastState.status === 'complete' ? 'success' : 'error');
 
-          this.recordSession(chatId, displayPrompt, lastState.responseText, processor.getSessionId(), lastState.costUsd, durationMs);
+          this.recordSession(sessionKey, displayPrompt, lastState.responseText, processor.getSessionId(), lastState.costUsd, durationMs);
           await this.sendCompletionNotice(chatId, lastState, durationMs);
           await this.outputHandler.sendOutputFiles(chatId, outputsDir, processor, lastState);
           return; // skip the normal error handling below
@@ -1038,7 +1141,7 @@ export class MessageBridge {
         errorMessage: err.message || 'Unknown error',
       };
       await rateLimiter.cancelAndWait();
-      await this.sendFinalCard(messageId, errorState, chatId);
+      await this.sendFinalCard(messageId, errorState, sessionKey);
     } finally {
       clearTimeout(timeoutId);
       if (idleTimerId) clearTimeout(idleTimerId);
@@ -1047,10 +1150,10 @@ export class MessageBridge {
       }
       try { executionHandle.finish(); } catch (e) { this.logger.warn({ err: e, chatId }, 'Error finishing execution handle'); }
       // Only delete if this is still our task (guards against stopTask race condition)
-      if (this.runningTasks.get(chatId) === runningTask) {
-        this.runningTasks.delete(chatId);
+      if (this.runningTasks.get(sessionKey) === runningTask) {
+        this.runningTasks.delete(sessionKey);
         metrics.setGauge('metabot_active_tasks', this.runningTasks.size);
-        this.processQueue(chatId);
+        this.processQueue(sessionKey);
       }
       if (imagePath) {
         try { fs.unlinkSync(imagePath); } catch { /* ignore */ }
@@ -1068,8 +1171,15 @@ export class MessageBridge {
   async executeApiTask(options: ApiTaskOptions): Promise<ApiTaskResult> {
     const { prompt, chatId, userId = 'api', sendCards = false } = options;
 
-    if (this.runningTasks.has(chatId)) {
-      return { success: false, responseText: '', error: 'Chat is busy with another task' };
+    // API tasks use chatId as sessionKey (no thread context)
+    const sessionKey = chatId;
+
+    if (this.runningTasks.has(sessionKey)) {
+      return { success: false, responseText: '', error: 'This API session already has a running task' };
+    }
+
+    if (this.concurrentCountForChat(chatId) >= this.maxConcurrentForChat()) {
+      return { success: false, responseText: '', error: `Chat already has ${this.concurrentCountForChat(chatId)} tasks running (max: ${this.maxConcurrentForChat()})` };
     }
 
     const { session, engineName } = this.prepareSessionForExecution(chatId);
@@ -1124,6 +1234,9 @@ export class MessageBridge {
       processor,
       rateLimiter,
       chatId,
+      sessionKey: chatId, // API tasks don't have thread context, use chatId as sessionKey
+      threadId: undefined, // API tasks don't have thread context
+      userMessageId: '', // API tasks don't have a user message to reply to
     };
     this.runningTasks.set(chatId, runningTask);
     metrics.setGauge('metabot_active_tasks', this.runningTasks.size);
@@ -1416,11 +1529,11 @@ export class MessageBridge {
    * Retries with exponential backoff (2s → 4s → 8s). If all retries fail,
    * sends a plain text fallback so the user at least sees the result.
    */
-  private async sendFinalCard(messageId: string, state: CardState, chatId?: string): Promise<void> {
+  private async sendFinalCard(messageId: string, state: CardState, sessionKey?: string): Promise<void> {
     // Accumulate usage into session and inject cumulative cost for display
-    if (chatId && (state.status === 'complete' || state.status === 'error')) {
-      this.sessionManager.addUsage(chatId, state.totalTokens ?? 0, state.costUsd ?? 0, state.durationMs ?? 0);
-      const session = this.sessionManager.getSession(chatId);
+    if (sessionKey && (state.status === 'complete' || state.status === 'error')) {
+      this.sessionManager.addUsage(sessionKey, state.totalTokens ?? 0, state.costUsd ?? 0, state.durationMs ?? 0);
+      const session = this.sessionManager.getSession(sessionKey);
       state.sessionCostUsd = session.cumulativeCostUsd;
     }
     for (let attempt = 0; attempt < FINAL_CARD_RETRIES; attempt++) {
@@ -1430,8 +1543,10 @@ export class MessageBridge {
       this.logger.warn({ attempt, delay, messageId }, 'Final card update failed, retrying');
       await new Promise((r) => setTimeout(r, delay));
     }
-    if (chatId) {
-      this.logger.error({ messageId, chatId }, 'All final card retries failed, sending text fallback');
+    if (sessionKey) {
+      this.logger.error({ messageId, sessionKey }, 'All final card retries failed, sending text fallback');
+      // Extract chatId from sessionKey (format: chatId:threadKey)
+      const chatId = sessionKey.split(':')[0];
       const statusEmoji = state.status === 'complete' ? '✅' : '❌';
       const summary = state.responseText
         ? state.responseText.slice(0, 2000)
@@ -1445,7 +1560,7 @@ export class MessageBridge {
   /**
    * Read and send plan file content to the user when ExitPlanMode is triggered.
    */
-  private async sendPlanContent(chatId: string, processor: StreamProcessor, _currentState: CardState): Promise<void> {
+  private async sendPlanContent(chatId: string, processor: StreamProcessor, _currentState: CardState, userMessageId?: string): Promise<void> {
     const planPath = processor.getPlanFilePath();
     if (!planPath) return;
 
@@ -1454,7 +1569,12 @@ export class MessageBridge {
       if (!planContent.trim()) return;
 
       this.logger.info({ chatId, planPath }, 'Sending plan content to user');
-      await this.sender.sendTextNotice(chatId, '📋 Plan', planContent, 'green');
+      // Use thread reply if available (for Feishu)
+      if (this.sender.replyTextNotice && userMessageId) {
+        await this.sender.replyTextNotice(userMessageId, '📋 Plan', planContent, 'green', true);
+      } else {
+        await this.sender.sendTextNotice(chatId, '📋 Plan', planContent, 'green');
+      }
     } catch (err) {
       this.logger.warn({ err, planPath, chatId }, 'Failed to read plan file for display');
     }
@@ -1466,25 +1586,27 @@ export class MessageBridge {
    * Only sends for tasks that took longer than 10 seconds.
    */
   /** Record session and messages in the cross-platform registry. */
-  private recordSession(chatId: string, prompt: string, responseText: string | undefined, claudeSessionId: string | undefined, costUsd: number | undefined, durationMs: number | undefined): void {
+  private recordSession(sessionKey: string, prompt: string, responseText: string | undefined, claudeSessionId: string | undefined, costUsd: number | undefined, durationMs: number | undefined): void {
     if (!this.sessionRegistry) return;
     try {
+      // sessionRegistry uses chatId for discovery, but sessionKey for sessionManager lookups
+      const chatId = sessionKey.split(':')[0];
       this.sessionRegistry.createOrUpdate({
         chatId,
         botName: this.config.name,
         claudeSessionId,
-        workingDirectory: this.sessionManager.getSession(chatId).workingDirectory,
+        workingDirectory: this.sessionManager.getSession(sessionKey).workingDirectory,
         prompt,
         responseText,
         costUsd,
         durationMs,
       });
     } catch (err) {
-      this.logger.warn({ err, chatId }, 'Failed to record session in registry');
+      this.logger.warn({ err, sessionKey }, 'Failed to record session in registry');
     }
   }
 
-  private async sendCompletionNotice(chatId: string, state: CardState, durationMs: number): Promise<void> {
+  private async sendCompletionNotice(chatId: string, state: CardState, durationMs: number, userMessageId?: string): Promise<void> {
     // Some senders (WeChat) already send the final response as a standalone message, so skip
     if (this.sender.skipCompletionNotice) return;
     // Only notify for tasks that took a while — quick tasks don't need it
@@ -1521,7 +1643,12 @@ export class MessageBridge {
     const message = `${statusEmoji} ${statusWord} (${durationStr}${costStr}${modelStr}${usageStr})`;
 
     try {
-      await this.sender.sendText(chatId, message);
+      // Use thread reply if available (for Feishu)
+      if (this.sender.replyText && userMessageId) {
+        await this.sender.replyText(userMessageId, message, true);
+      } else {
+        await this.sender.sendText(chatId, message);
+      }
     } catch (err) {
       this.logger.warn({ err, chatId }, 'Failed to send completion notice');
     }
