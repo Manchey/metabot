@@ -11,8 +11,7 @@ export type AuditEvent =
   | 'command'
   | 'auth_denied'
   | 'api_task_start'
-  | 'api_task_complete'
-  | 'fork';
+  | 'api_task_complete';
 
 export interface AuditEntry {
   event: AuditEvent;

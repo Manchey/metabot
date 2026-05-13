@@ -72,8 +72,4 @@ export class FeishuSenderAdapter implements IMessageSender {
   async downloadFile(messageId: string, fileKey: string, savePath: string): Promise<boolean> {
     return this.sender.downloadFile(messageId, fileKey, savePath);
   }
-
-  async createGroup(name: string, userIdList: string[], description?: string): Promise<string | undefined> {
-    return this.sender.createGroup(name, userIdList, description);
-  }
 }

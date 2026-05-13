@@ -120,8 +120,6 @@ export class MessageBridge {
   private pendingBatches = new Map<string, PendingBatch>(); // per-sessionKey media debounce batches
   /** Tracks sessionKeys currently in the startup phase (prevents race condition). */
   private startingSessions = new Set<string>();
-  /** Maps cardMessageId → sessionKey + display prompt for fork button handling. */
-  private cardToSessionKey = new Map<string, { sessionKey: string; userPrompt: string; ts: number }>();
   /** Callback for activity lifecycle events (task started/completed/failed). */
   onActivityEvent?: (event: ActivityEventData) => void;
 
@@ -257,7 +255,7 @@ export class MessageBridge {
 
   /** Return info about all currently running tasks (for team status display). */
   getRunningTasksInfo(): Array<{ chatId: string; startTime: number }> {
-    return Array.from(this.runningTasks.entries()).map(([sessionKey, task]) => ({
+    return Array.from(this.runningTasks.entries()).map(([_sessionKey, task]) => ({
       chatId: task.chatId,
       startTime: task.startTime,
     }));
@@ -315,18 +313,11 @@ export class MessageBridge {
     value: Record<string, unknown>;
   }): Promise<void> {
     const { chatId, userId, messageId, value } = event;
-    const action = value.action as string;
-
-    // Fork action doesn't need a running task or pending question
-    if (action === 'fork_conversation') {
-      await this.handleForkAction(chatId, userId, messageId);
-      return;
-    }
 
     // Find task by chatId — if multiple threads are running, check all tasks
     // and match the one with a pending question that matches this card action
     let task: RunningTask | undefined;
-    for (const [key, t] of this.runningTasks) {
+    for (const [_key, t] of this.runningTasks) {
       if (t.chatId === chatId && t.pendingQuestion) {
         task = t;
         // If there are multiple pending questions across threads, prefer the one
@@ -364,55 +355,6 @@ export class MessageBridge {
       text: String(optionIndex + 1),
     };
     await this.handleAnswer(syntheticMsg, task);
-  }
-
-  /** Handle the "建群跟进" fork button on completed cards. Creates a new group and migrates the session. */
-  private async handleForkAction(chatId: string, userId: string, cardMessageId: string): Promise<void> {
-    if (!this.sender.createGroup) {
-      await this.sendThreadNotice(chatId, undefined, '❌ Not Supported', 'Group creation is only available on Feishu.', 'red');
-      return;
-    }
-
-    // Clean up stale entries (> 30 min old) from cardToSessionKey
-    const now = Date.now();
-    for (const [key, info] of this.cardToSessionKey) {
-      if (now - info.ts > 30 * 60 * 1000) this.cardToSessionKey.delete(key);
-    }
-
-    const cardInfo = this.cardToSessionKey.get(cardMessageId);
-    if (!cardInfo) {
-      await this.sendThreadNotice(chatId, undefined, '❌ Session Expired', 'The session context for this card has expired. Start a new conversation instead.', 'red');
-      return;
-    }
-
-    // Derive a group name from the user's original prompt
-    const maxNameLen = 30;
-    const rawPrompt = cardInfo.userPrompt || 'Claude 话题';
-    const topicName = rawPrompt.length > maxNameLen
-      ? rawPrompt.slice(0, maxNameLen) + '…'
-      : rawPrompt;
-
-    const newChatId = await this.sender.createGroup(topicName, [userId]);
-    if (!newChatId) {
-      await this.sendThreadNotice(chatId, undefined, '❌ Group Creation Failed', 'Could not create a new group. Please try again or use `/fork`.', 'red');
-      return;
-    }
-
-    // New group is a fresh chat, so sessionKey = chatId:chatId
-    const newSessionKey = `${newChatId}:${newChatId}`;
-    this.sessionManager.migrateSession(cardInfo.sessionKey, newSessionKey);
-
-    this.logger.info({ chatId, newChatId, userId, fromSession: cardInfo.sessionKey, toSession: newSessionKey }, 'Fork: group created and session migrated');
-    this.audit.log({ event: 'fork', botName: this.config.name, chatId, userId, meta: { newChatId } });
-
-    // Send confirmation in the original chat
-    await this.sendThreadNotice(
-      chatId,
-      undefined,
-      '✅ Group Created',
-      `New group **${topicName}** created!\nChat ID: \`${newChatId}\`\n\nThe Claude session context has been migrated — you can continue the conversation seamlessly in the new group.`,
-      'green',
-    );
   }
 
   async handleMessage(msg: IncomingMessage): Promise<void> {
@@ -893,8 +835,6 @@ const { userId, chatId, text, imageKey, fileKey, fileName, messageId: msgId, thr
     };
     this.runningTasks.set(sessionKey, runningTask);
     this.startingSessions.delete(sessionKey); // Task is now fully registered — remove startup guard
-    // Store card → sessionKey mapping for fork button handling
-    this.cardToSessionKey.set(messageId, { sessionKey, userPrompt: displayPrompt, ts: Date.now() });
     metrics.setGauge('metabot_active_tasks', this.runningTasks.size);
 
     this.audit.log({ event: 'task_start', botName: this.config.name, chatId, userId, prompt: text });
@@ -1087,7 +1027,6 @@ if (newSid) this.sessionManager.setSessionId(sessionKey, newSid, engineName);
 
       await this.sendFinalCard(messageId, lastState, sessionKey);
 
-      // Audit + cost tracking
       const durationMs = Date.now() - startTime;
       const auditEvent = timedOut ? 'task_timeout' as const
         : idledOut ? 'task_idle_timeout' as const
@@ -1299,9 +1238,6 @@ if (newSid) this.sessionManager.setSessionId(sessionKey, newSid, engineName);
       userMessageId: '', // API tasks don't have a user message to reply to
     };
     this.runningTasks.set(chatId, runningTask);
-    if (messageId) {
-      this.cardToSessionKey.set(messageId, { sessionKey: chatId, userPrompt: prompt, ts: Date.now() });
-    }
     metrics.setGauge('metabot_active_tasks', this.runningTasks.size);
 
     this.audit.log({ event: 'api_task_start', botName: this.config.name, chatId, userId, prompt });

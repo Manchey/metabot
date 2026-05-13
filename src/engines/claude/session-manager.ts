@@ -162,16 +162,6 @@ export class SessionManager {
     }
   }
 
-  /** Copy a session entry from one key to another, preserving session ID, working directory, engine, and model preferences. */
-  migrateSession(fromKey: string, toKey: string): boolean {
-    const src = this.sessions.get(fromKey);
-    if (!src) return false;
-    this.sessions.set(toKey, { ...src });
-    this.logger.info({ fromKey, toKey }, 'Session migrated');
-    this.saveToDisk();
-    return true;
-  }
-
   private cleanupExpired(): void {
     const now = Date.now();
     let changed = false;

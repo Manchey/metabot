@@ -182,23 +182,6 @@ export function buildCard(state: CardState): string {
     }
   }
 
-  // Fork button — only on final (complete/error) cards
-  // TEMPORARILY DISABLED for testing 230099
-  // if (state.status === 'complete' || state.status === 'error') {
-  //   elements.push({ tag: 'hr' });
-  //   elements.push({
-  //     tag: 'action',
-  //     actions: [{
-  //       tag: 'button',
-  //       text: { tag: 'plain_text', content: '建群跟进' },
-  //       type: 'primary',
-  //       value: {
-  //         action: 'fork_conversation',
-  //       },
-  //     }],
-  //   });
-  // }
-
   const card = {
     // update_multi lets us re-render the same card after an action click
     // without hitting Feishu error 108002 ("card has already been updated").

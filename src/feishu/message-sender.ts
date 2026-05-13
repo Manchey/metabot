@@ -334,40 +334,4 @@ export class MessageSender {
       return false;
     }
   }
-
-  /**
-   * Create a new group chat and return the chatId.
-   * Uses set_bot_manager so the creating bot is automatically added as manager.
-   * @param name - Group name
-   * @param userIdList - User open_ids to add
-   * @param description - Optional group description
-   * @returns The new chat_id, or undefined on failure
-   */
-  async createGroup(name: string, userIdList: string[], description?: string): Promise<string | undefined> {
-    try {
-      const resp = await this.client.im.v1.chat.create({
-        data: {
-          name,
-          description: description || '',
-          user_id_list: userIdList,
-          group_message_type: 'thread',
-          chat_mode: 'group',
-          chat_type: 'private',
-        },
-        params: {
-          user_id_type: 'open_id',
-          set_bot_manager: true,
-        },
-      });
-      const chatId = resp?.data?.chat_id;
-      if (!chatId) {
-        this.logger.error({ resp }, 'Failed to get chat_id from group creation');
-      }
-      this.logger.info({ chatId, name, userIdList }, 'Group created');
-      return chatId;
-    } catch (err) {
-      this.logger.error({ err, name }, 'Failed to create group');
-      return undefined;
-    }
-  }
 }

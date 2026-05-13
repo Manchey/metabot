@@ -261,28 +261,6 @@ export function buildCardV2(state: CardState): string {
     }
   }
 
-  // Fork button — only on final (complete/error) cards
-  // TEMPORARILY DISABLED for testing 230099
-  // if (state.status === 'complete' || state.status === 'error') {
-  //   elements.push({ tag: 'hr' });
-  //   elements.push({
-  //     tag: 'action',
-  //     actions: [{
-  //       tag:  'button',
-  //       text: { tag: 'plain_text', content: '建群跟进' },
-  //       type: 'primary',
-  //       behaviors: [
-  //         {
-  //           type:  'callback',
-  //           value: {
-  //             action: 'fork_conversation',
-  //           },
-  //         },
-  //       ],
-  //     }],
-  //   });
-  // }
-
   const card = {
     schema: '2.0',
     config: {

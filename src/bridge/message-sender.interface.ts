@@ -46,7 +46,4 @@ export interface IMessageSender {
 
   /** If true, the bridge will not send a separate "Task completed" text after the card update. */
   skipCompletionNotice?: boolean;
-
-  /** Create a new group chat and return the chatId. Platform-specific (Feishu only). */
-  createGroup?(name: string, userIdList: string[], description?: string): Promise<string | undefined>;
 }
