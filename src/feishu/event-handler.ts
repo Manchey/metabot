@@ -2,6 +2,7 @@ import * as lark from '@larksuiteoapi/node-sdk';
 import type { BotConfig } from '../config.js';
 import type { Logger } from '../utils/logger.js';
 import { MessageSender } from './message-sender.js';
+import { isNoMentionChat } from '../utils/no-mention-store.js';
 
 // Re-export from shared types so existing imports continue to work
 export type { IncomingMessage } from '../types.js';
@@ -68,6 +69,8 @@ async function isPrivateLikeGroup(chatId: string, sender: MessageSender): Promis
     memberCountCache.set(chatId, { count, ts: Date.now() });
     return count === 2;
   }
+  // API call failed — likely missing im:chat:readonly permission.
+  // Use /noMention command as a manual override.
   return false;
 }
 
@@ -155,15 +158,17 @@ export function createEventDispatcher(
         logger.debug({ messageId, threadId, rootId, parentMessageId }, 'Message thread info');
 
         // In group chats, only respond when the bot is @mentioned
-        // Exceptions: 2-member groups are treated like DMs; groupNoMention mode skips @mention check
+        // Exceptions: /noMention override; 2-member groups (private-like); groupNoMention mode
         const mentions = message.mentions;
         if (chatType === 'group') {
           const botMentioned = botOpenId
             ? mentions?.some((m: any) => m.id?.open_id === botOpenId)
             : mentions && mentions.length > 0;
           if (!botMentioned) {
-            // groupNoMention mode: respond to all messages without @mention
-            if (config.groupNoMention) {
+            // /noMention command override — user explicitly toggled this chat
+            if (isNoMentionChat(config.name, chatId)) {
+              logger.debug({ chatId }, '/noMention override, processing without @mention');
+            } else if (config.groupNoMention) {
               logger.debug({ chatId }, 'Group no-mention mode enabled, processing without @mention');
             } else if (messageSender && await isPrivateLikeGroup(chatId, messageSender)) {
               logger.debug({ chatId }, 'Private-like group (2 members), processing without @mention');

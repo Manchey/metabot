@@ -269,9 +269,11 @@ export class MessageSender {
       });
       const userCount = parseInt(resp?.data?.user_count, 10) || 0;
       const botCount = parseInt(resp?.data?.bot_count, 10) || 0;
-      return userCount + botCount;
+      const total = userCount + botCount;
+      this.logger.debug({ chatId, userCount, botCount, total }, 'Chat member count retrieved');
+      return total;
     } catch (err) {
-      this.logger.error({ err, chatId }, 'Failed to get chat member count');
+      this.logger.error({ err, chatId }, 'Failed to get chat member count (may need im:chat:readonly permission)');
       return undefined;
     }
   }

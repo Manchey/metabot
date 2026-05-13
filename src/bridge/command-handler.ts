@@ -7,6 +7,7 @@ import type { EngineName } from '../engines/index.js';
 import { MemoryClient } from '../memory/memory-client.js';
 import { AuditLogger } from '../utils/audit-logger.js';
 import type { DocSync } from '../sync/doc-sync.js';
+import { addNoMentionChat, removeNoMentionChat, isNoMentionChat } from '../utils/no-mention-store.js';
 
 /** Helper function type for sending thread-aware notice replies. */
 type ReplyNotice = (title: string, content: string, color?: string) => Promise<void>;
@@ -63,6 +64,7 @@ export class CommandHandler {
           '`/model` - Show current engine/model; `/model list` - Available options',
           '`/model claude`, `/model kimi`, or `/model codex` - Switch engine (resets session)',
           '`/model <name>` - Set model for current engine',
+          '`/noMention` - Skip @mention requirement in this chat (2-member groups)',
           '`/memory` - Memory document commands',
           '`/help` - Show this help message',
           '',
@@ -131,6 +133,23 @@ export class CommandHandler {
       case '/model': {
         const args = text.slice('/model'.length).trim();
         await this.handleModelCommand(sessionKey, args, replyNotice);
+        return true;
+      }
+
+      case '/noMention': {
+        const args = text.slice('/noMention'.length).trim().toLowerCase();
+        if (args === 'off' || args === '0' || args === 'false') {
+          removeNoMentionChat(this.config.name, chatId);
+          await replyNotice('✅ @Mention Required', 'This chat now requires @mention to trigger the bot.', 'green');
+        } else {
+          const already = isNoMentionChat(this.config.name, chatId);
+          if (already) {
+            await replyNotice('ℹ️ Already Active', 'This chat already skips the @mention requirement.\nUse `/noMention off` to restore it.', 'blue');
+          } else {
+            addNoMentionChat(this.config.name, chatId);
+            await replyNotice('✅ No @Mention Needed', 'You can now message the bot directly in this chat without @mention.\nUse `/noMention off` to restore the requirement.', 'green');
+          }
+        }
         return true;
       }
 
