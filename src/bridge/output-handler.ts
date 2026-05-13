@@ -17,6 +17,7 @@ export class OutputHandler {
     outputsDir: string,
     processor: StreamProcessor,
     state: CardState,
+    userMessageId?: string,
   ): Promise<void> {
     const sentPaths = new Set<string>();
 
@@ -26,14 +27,31 @@ export class OutputHandler {
       try {
         if (file.isImage && file.sizeBytes < 10 * 1024 * 1024) {
           this.logger.info({ filePath: file.filePath }, 'Sending output image from outputs dir');
-          await this.sender.sendImageFile(chatId, file.filePath);
+          if (this.sender.replyImageFile && userMessageId) {
+            await this.sender.replyImageFile(userMessageId, file.filePath, true);
+          } else {
+            await this.sender.sendImageFile(chatId, file.filePath);
+          }
         } else if (!file.isImage && file.sizeBytes < 50 * 1024 * 1024) {
           this.logger.info({ filePath: file.filePath }, 'Sending output file from outputs dir');
-          const sent = await this.sender.sendLocalFile(chatId, file.filePath, file.fileName);
-          if (!sent && OutputsManager.isTextFile(file.extension) && file.sizeBytes < 30 * 1024) {
-            this.logger.info({ filePath: file.filePath }, 'File upload failed, sending as text message');
-            const content = fs.readFileSync(file.filePath, 'utf-8');
-            await this.sender.sendText(chatId, `📄 ${file.fileName}\n\n${content}`);
+          if (this.sender.replyLocalFile && userMessageId) {
+            const sent = await this.sender.replyLocalFile(userMessageId, file.filePath, file.fileName, true);
+            if (!sent && OutputsManager.isTextFile(file.extension) && file.sizeBytes < 30 * 1024) {
+              this.logger.info({ filePath: file.filePath }, 'File reply failed, sending as text message');
+              const content = fs.readFileSync(file.filePath, 'utf-8');
+              if (this.sender.replyText && userMessageId) {
+                await this.sender.replyText(userMessageId, `📄 ${file.fileName}\n\n${content}`, true);
+              } else {
+                await this.sender.sendText(chatId, `📄 ${file.fileName}\n\n${content}`);
+              }
+            }
+          } else {
+            const sent = await this.sender.sendLocalFile(chatId, file.filePath, file.fileName);
+            if (!sent && OutputsManager.isTextFile(file.extension) && file.sizeBytes < 30 * 1024) {
+              this.logger.info({ filePath: file.filePath }, 'File upload failed, sending as text message');
+              const content = fs.readFileSync(file.filePath, 'utf-8');
+              await this.sender.sendText(chatId, `📄 ${file.fileName}\n\n${content}`);
+            }
           }
         } else {
           this.logger.warn({ filePath: file.filePath, sizeBytes: file.sizeBytes }, 'Output file too large to send');
@@ -59,7 +77,11 @@ export class OutputHandler {
           const size = fs.statSync(imgPath).size;
           if (size > 0 && size < 10 * 1024 * 1024) {
             this.logger.info({ imgPath }, 'Sending output image (fallback)');
-            await this.sender.sendImageFile(chatId, imgPath);
+            if (this.sender.replyImageFile && userMessageId) {
+              await this.sender.replyImageFile(userMessageId, imgPath, true);
+            } else {
+              await this.sender.sendImageFile(chatId, imgPath);
+            }
           }
         }
       } catch (err) {

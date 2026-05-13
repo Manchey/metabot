@@ -67,8 +67,10 @@ export class MessageSender {
         data: { content: cardContent },
       });
       return true;
-    } catch (err) {
-      this.logger.error({ err, messageId }, 'Failed to update card');
+    } catch (err: any) {
+      const apiMsg = err?.msg || err?.message || String(err);
+      const apiCode = err?.code || err?.error?.code;
+      this.logger.error({ err, messageId, apiCode, apiMsg, contentLen: cardContent?.length }, 'Failed to update card');
       return false;
     }
   }
@@ -155,6 +157,37 @@ export class MessageSender {
     return this.sendImage(chatId, imageKey);
   }
 
+  /**
+   * Reply to a message with an image, optionally in a thread.
+   * Uploads the image first, then replies with the image_key.
+   */
+  async replyImageFile(messageId: string, filePath: string, replyInThread: boolean = true): Promise<boolean> {
+    const imageKey = await this.uploadImage(filePath);
+    if (!imageKey) return false;
+    return this.replyImage(messageId, imageKey, replyInThread);
+  }
+
+  /**
+   * Reply to a message with an image key, optionally in a thread.
+   */
+  async replyImage(messageId: string, imageKey: string, replyInThread: boolean = true): Promise<boolean> {
+    try {
+      await this.client.im.v1.message.reply({
+        path: { message_id: messageId },
+        data: {
+          content: JSON.stringify({ image_key: imageKey }),
+          msg_type: 'image',
+          reply_in_thread: replyInThread,
+        },
+      });
+      this.logger.info({ messageId, imageKey, replyInThread }, 'Image reply sent');
+      return true;
+    } catch (err) {
+      this.logger.error({ err, messageId, imageKey, replyInThread }, 'Failed to reply image');
+      return false;
+    }
+  }
+
   async uploadFile(filePath: string, fileName: string, fileType: string): Promise<string | undefined> {
     try {
       const resp = await this.client.im.v1.file.create({
@@ -196,6 +229,37 @@ export class MessageSender {
     const fileKey = await this.uploadFile(filePath, fileName, fileType);
     if (!fileKey) return false;
     return this.sendFile(chatId, fileKey);
+  }
+
+  /**
+   * Reply to a message with a file, optionally in a thread.
+   * Uploads the file first, then replies with the file_key.
+   */
+  async replyLocalFile(messageId: string, filePath: string, fileName: string, fileType: string, replyInThread: boolean = true): Promise<boolean> {
+    const fileKey = await this.uploadFile(filePath, fileName, fileType);
+    if (!fileKey) return false;
+    return this.replyFile(messageId, fileKey, replyInThread);
+  }
+
+  /**
+   * Reply to a message with a file key, optionally in a thread.
+   */
+  async replyFile(messageId: string, fileKey: string, replyInThread: boolean = true): Promise<boolean> {
+    try {
+      await this.client.im.v1.message.reply({
+        path: { message_id: messageId },
+        data: {
+          content: JSON.stringify({ file_key: fileKey }),
+          msg_type: 'file',
+          reply_in_thread: replyInThread,
+        },
+      });
+      this.logger.info({ messageId, fileKey, replyInThread }, 'File reply sent');
+      return true;
+    } catch (err) {
+      this.logger.error({ err, messageId, fileKey, replyInThread }, 'Failed to reply file');
+      return false;
+    }
   }
 
   async getChatMemberCount(chatId: string): Promise<number | undefined> {
@@ -268,6 +332,42 @@ export class MessageSender {
     } catch (err) {
       this.logger.error({ err, messageId, emojiType }, 'Failed to add reaction');
       return false;
+    }
+  }
+
+  /**
+   * Create a new group chat and return the chatId.
+   * Uses set_bot_manager so the creating bot is automatically added as manager.
+   * @param name - Group name
+   * @param userIdList - User open_ids to add
+   * @param description - Optional group description
+   * @returns The new chat_id, or undefined on failure
+   */
+  async createGroup(name: string, userIdList: string[], description?: string): Promise<string | undefined> {
+    try {
+      const resp = await this.client.im.v1.chat.create({
+        data: {
+          name,
+          description: description || '',
+          user_id_list: userIdList,
+          group_message_type: 'thread',
+          chat_mode: 'group',
+          chat_type: 'private',
+        },
+        params: {
+          user_id_type: 'open_id',
+          set_bot_manager: true,
+        },
+      });
+      const chatId = resp?.data?.chat_id;
+      if (!chatId) {
+        this.logger.error({ resp }, 'Failed to get chat_id from group creation');
+      }
+      this.logger.info({ chatId, name, userIdList }, 'Group created');
+      return chatId;
+    } catch (err) {
+      this.logger.error({ err, name }, 'Failed to create group');
+      return undefined;
     }
   }
 }

@@ -29,8 +29,14 @@ export interface IMessageSender {
   /** Send a local image file to the chat. */
   sendImageFile(chatId: string, filePath: string): Promise<boolean>;
 
+  /** Reply to a message with a local image file, optionally in a thread. */
+  replyImageFile?(messageId: string, filePath: string, replyInThread?: boolean): Promise<boolean>;
+
   /** Send a local file to the chat. */
   sendLocalFile(chatId: string, filePath: string, fileName: string): Promise<boolean>;
+
+  /** Reply to a message with a local file, optionally in a thread. */
+  replyLocalFile?(messageId: string, filePath: string, fileName: string, replyInThread?: boolean): Promise<boolean>;
 
   /** Download a user-sent image to a local path. */
   downloadImage(messageId: string, imageKey: string, savePath: string): Promise<boolean>;
@@ -40,4 +46,7 @@ export interface IMessageSender {
 
   /** If true, the bridge will not send a separate "Task completed" text after the card update. */
   skipCompletionNotice?: boolean;
+
+  /** Create a new group chat and return the chatId. Platform-specific (Feishu only). */
+  createGroup?(name: string, userIdList: string[], description?: string): Promise<string | undefined>;
 }

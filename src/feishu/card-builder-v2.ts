@@ -119,15 +119,32 @@ export function buildCardV2(state: CardState): string {
 
   // Tool calls section
   if (state.toolCalls.length > 0) {
-    const toolLines = state.toolCalls.map((t) => {
-      const icon = t.status === 'running' ? '⏳' : '✅';
-      return `${icon} **${t.name}** ${t.detail}`;
-    });
-    elements.push({
-      tag:     'markdown',
-      content: toolLines.join('\n'),
-    });
-    elements.push({ tag: 'hr' });
+    const isFinal = state.status === 'complete' || state.status === 'error';
+    if (isFinal) {
+      // Final card: show only a one-line summary
+      const counts = new Map<string, number>();
+      for (const t of state.toolCalls) counts.set(t.name, (counts.get(t.name) ?? 0) + 1);
+      const parts = Array.from(counts.entries())
+        .sort((a, b) => b[1] - a[1])
+        .map(([name, count]) => `${name}×${count}`);
+      const summary = `✅ **${state.toolCalls.length} tools** (${parts.join(', ')})`;
+      elements.push({
+        tag:     'markdown',
+        content: summary,
+      });
+      elements.push({ tag: 'hr' });
+    } else {
+      // Streaming: show individual tool calls with status
+      const toolLines = state.toolCalls.map((t) => {
+        const icon = t.status === 'running' ? '⏳' : '✅';
+        return `${icon} **${t.name}** ${t.detail}`;
+      });
+      elements.push({
+        tag:     'markdown',
+        content: toolLines.join('\n'),
+      });
+      elements.push({ tag: 'hr' });
+    }
   }
 
   // Background tasks (Monitor, etc.)
@@ -243,6 +260,28 @@ export function buildCardV2(state: CardState): string {
       });
     }
   }
+
+  // Fork button — only on final (complete/error) cards
+  // TEMPORARILY DISABLED for testing 230099
+  // if (state.status === 'complete' || state.status === 'error') {
+  //   elements.push({ tag: 'hr' });
+  //   elements.push({
+  //     tag: 'action',
+  //     actions: [{
+  //       tag:  'button',
+  //       text: { tag: 'plain_text', content: '建群跟进' },
+  //       type: 'primary',
+  //       behaviors: [
+  //         {
+  //           type:  'callback',
+  //           value: {
+  //             action: 'fork_conversation',
+  //           },
+  //         },
+  //       ],
+  //     }],
+  //   });
+  // }
 
   const card = {
     schema: '2.0',

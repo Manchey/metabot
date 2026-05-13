@@ -63,6 +63,7 @@ export class CommandHandler {
           '`/model` - Show current engine/model; `/model list` - Available options',
           '`/model claude`, `/model kimi`, or `/model codex` - Switch engine (resets session)',
           '`/model <name>` - Set model for current engine',
+          '`/fork <name>` - Create a dedicated group for this topic (inherits session)',
           '`/memory` - Memory document commands',
           '`/help` - Show this help message',
           '',
@@ -131,6 +132,28 @@ export class CommandHandler {
       case '/model': {
         const args = text.slice('/model'.length).trim();
         await this.handleModelCommand(sessionKey, args, replyNotice);
+        return true;
+      }
+
+      case '/fork': {
+        const topicName = text.slice('/fork'.length).trim() || 'Claude 话题群';
+        if (!this.sender.createGroup) {
+          await replyNotice('❌ Not Supported', 'Group creation is only available on Feishu.', 'red');
+          return true;
+        }
+        const newChatId = await this.sender.createGroup(topicName, [userId]);
+        if (!newChatId) {
+          await replyNotice('❌ Group Creation Failed', 'Could not create a new group. Please try again.', 'red');
+          return true;
+        }
+        // Migrate session to new group (new group is a fresh chat, so sessionKey = chatId:chatId)
+        const newSessionKey = `${newChatId}:${newChatId}`;
+        this.sessionManager.migrateSession(sessionKey, newSessionKey);
+        await replyNotice(
+          '✅ Group Created',
+          `New group **${topicName}** created!\nChat ID: \`${newChatId}\`\n\nThe Claude session context has been migrated — you can continue the conversation seamlessly in the new group.`,
+          'green',
+        );
         return true;
       }
 

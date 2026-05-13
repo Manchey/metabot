@@ -49,10 +49,20 @@ export class FeishuSenderAdapter implements IMessageSender {
     return this.sender.sendImageFile(chatId, filePath);
   }
 
+  async replyImageFile(messageId: string, filePath: string, replyInThread: boolean = true): Promise<boolean> {
+    return this.sender.replyImageFile(messageId, filePath, replyInThread);
+  }
+
   async sendLocalFile(chatId: string, filePath: string, fileName: string): Promise<boolean> {
     const ext = path.extname(fileName).toLowerCase();
     const feishuType = OutputsManager.feishuFileType(ext);
     return this.sender.sendLocalFile(chatId, filePath, fileName, feishuType);
+  }
+
+  async replyLocalFile(messageId: string, filePath: string, fileName: string, replyInThread: boolean = true): Promise<boolean> {
+    const ext = path.extname(fileName).toLowerCase();
+    const feishuType = OutputsManager.feishuFileType(ext);
+    return this.sender.replyLocalFile(messageId, filePath, fileName, feishuType, replyInThread);
   }
 
   async downloadImage(messageId: string, imageKey: string, savePath: string): Promise<boolean> {
@@ -61,5 +71,9 @@ export class FeishuSenderAdapter implements IMessageSender {
 
   async downloadFile(messageId: string, fileKey: string, savePath: string): Promise<boolean> {
     return this.sender.downloadFile(messageId, fileKey, savePath);
+  }
+
+  async createGroup(name: string, userIdList: string[], description?: string): Promise<string | undefined> {
+    return this.sender.createGroup(name, userIdList, description);
   }
 }

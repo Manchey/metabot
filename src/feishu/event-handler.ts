@@ -251,8 +251,31 @@ export function createEventDispatcher(
 
         // Common text cleanup for text and post messages
         if (msgType === 'text' || msgType === 'post') {
-          // Strip @mention tags (format: @_user_xxx or similar)
+          // Replace @mention tags with user names (only strip the bot's own @mention)
+        // Feishu text format: @_user_1 @张三 帮我看看
+        // mentions array: [{ key: "@_user_1", id: { open_id: "ou_xxx" }, name: "张三" }, ...]
+        if (mentions && Array.isArray(mentions)) {
+          for (const m of mentions) {
+            const key = m.key as string;
+            const mOpenId = m.id?.open_id as string;
+            const mName = m.name as string;
+            if (!key) continue;
+            if (botOpenId && mOpenId === botOpenId) {
+              // Strip bot's own @mention
+              text = text.replace(new RegExp(key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*', 'g'), '');
+            } else if (mName) {
+              // Replace other users' @mention with their display name
+              text = text.replace(new RegExp(key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*', 'g'), `@${mName} `);
+            } else {
+              // No name available, strip the placeholder
+              text = text.replace(new RegExp(key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*', 'g'), '');
+            }
+          }
+          text = text.trim();
+        } else {
+          // No mention data available, strip all @_xxx placeholders
           text = text.replace(/@_\w+\s*/g, '').trim();
+        }
 
           // Strip Feishu auto-generated markdown links: [text](url) → text
           text = text.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
