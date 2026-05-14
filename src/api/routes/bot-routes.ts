@@ -34,7 +34,7 @@ export async function handleBotRoutes(
       engine: resolveEngineName(bot.config),
       model: defaultModelForConfig(bot.config),
       workingDirectory: bot.config.claude.defaultWorkingDirectory,
-      maxConcurrentTasks: bot.config.maxConcurrentTasks, budgetLimitDaily: bot.config.budgetLimitDaily,
+      budgetLimitDaily: bot.config.budgetLimitDaily,
       stats: botStats || { totalTasks: 0, completedTasks: 0, failedTasks: 0, totalCostUsd: 0 },
     });
     return true;
