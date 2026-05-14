@@ -153,11 +153,11 @@ export function buildCard(state: CardState): string {
       : `${state.totalTokens}`;
     const ctxK = `${Math.round(state.contextWindow / 1000)}k`;
     const filled = Math.min(Math.round(pct / 10), 10);
-    const bar = '█'.repeat(filled) + '░'.repeat(10 - filled);
-    const warnIcon = pct >= 80 ? '⚠️ ' : '';
+    const bar = '🟩'.repeat(filled) + '⬜'.repeat(10 - filled);
+    const warnIcon = pct >= 80 ? '🔴 ' : '';
     elements.push({
       tag: 'markdown',
-      content: `${warnIcon}📊 ctx **${tokensK}**/${ctxK} ${bar} **${pct}%**`,
+      content: `${warnIcon}📊 **ctx ${tokensK}/${ctxK} (${pct}%)**\n${bar}`,
     });
   }
 
