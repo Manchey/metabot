@@ -456,6 +456,15 @@ export class TelegramSender implements IMessageSender {
     return this.downloadTelegramFile(fileId, savePath);
   }
 
+  // Telegram doesn't support reactions in the same way — return undefined/false as no-ops
+  async addReaction(_messageId: string, _emojiType: string): Promise<string | undefined> {
+    return undefined;
+  }
+
+  async removeReaction(_messageId: string, _reactionId: string): Promise<boolean> {
+    return false;
+  }
+
   private async downloadTelegramFile(fileId: string, savePath: string): Promise<boolean> {
     try {
       const file = await this.bot.api.getFile(fileId);

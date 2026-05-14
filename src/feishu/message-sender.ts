@@ -318,21 +318,41 @@ export class MessageSender {
   /**
    * Add an emoji reaction to a message.
    * @param messageId - The message ID to add reaction to
-   * @param emojiType - Emoji type, e.g. "OK", "DONE", "THUMBSUP", "HEART"
-   * @returns true if successful, false otherwise
+   * @param emojiType - Emoji type, e.g. "OK", "DONE", "THUMBSUP", "HEART", "HOURGLASS"
+   * @returns reaction_id if successful, undefined otherwise
    */
-  async addReaction(messageId: string, emojiType: string): Promise<boolean> {
+  async addReaction(messageId: string, emojiType: string): Promise<string | undefined> {
     try {
-      await this.client.im.v1.messageReaction.create({
+      const resp = await this.client.im.v1.messageReaction.create({
         path: { message_id: messageId },
         data: {
           reaction_type: { emoji_type: emojiType },
         },
       });
-      this.logger.info({ messageId, emojiType }, 'Reaction added to message');
-      return true;
+      const reactionId = resp?.data?.reaction_id;
+      this.logger.info({ messageId, emojiType, reactionId }, 'Reaction added to message');
+      return reactionId;
     } catch (err) {
       this.logger.error({ err, messageId, emojiType }, 'Failed to add reaction');
+      return undefined;
+    }
+  }
+
+  /**
+   * Remove an emoji reaction from a message.
+   * @param messageId - The message ID the reaction is on
+   * @param reactionId - The reaction ID to remove (obtained from addReaction response)
+   * @returns true if successful, false otherwise
+   */
+  async removeReaction(messageId: string, reactionId: string): Promise<boolean> {
+    try {
+      await this.client.im.v1.messageReaction.delete({
+        path: { message_id: messageId, reaction_id: reactionId },
+      });
+      this.logger.info({ messageId, reactionId }, 'Reaction removed from message');
+      return true;
+    } catch (err) {
+      this.logger.error({ err, messageId, reactionId }, 'Failed to remove reaction');
       return false;
     }
   }

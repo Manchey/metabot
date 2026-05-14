@@ -44,6 +44,12 @@ export interface IMessageSender {
   /** Download a user-sent file to a local path. */
   downloadFile(messageId: string, fileKey: string, savePath: string): Promise<boolean>;
 
+  /** Add an emoji reaction to a message. Returns reaction_id if successful, undefined otherwise. */
+  addReaction(messageId: string, emojiType: string): Promise<string | undefined>;
+
+  /** Remove an emoji reaction from a message. Returns true if successful. */
+  removeReaction(messageId: string, reactionId: string): Promise<boolean>;
+
   /** If true, the bridge will not send a separate "Task completed" text after the card update. */
   skipCompletionNotice?: boolean;
 }

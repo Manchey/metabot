@@ -72,4 +72,12 @@ export class FeishuSenderAdapter implements IMessageSender {
   async downloadFile(messageId: string, fileKey: string, savePath: string): Promise<boolean> {
     return this.sender.downloadFile(messageId, fileKey, savePath);
   }
+
+  async addReaction(messageId: string, emojiType: string): Promise<string | undefined> {
+    return this.sender.addReaction(messageId, emojiType);
+  }
+
+  async removeReaction(messageId: string, reactionId: string): Promise<boolean> {
+    return this.sender.removeReaction(messageId, reactionId);
+  }
 }

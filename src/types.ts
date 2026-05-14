@@ -71,4 +71,6 @@ export interface IncomingMessage {
   rootId?: string;
   /** Parent message ID (the immediate parent in thread hierarchy). */
   parentMessageId?: string;
+  /** Reaction ID of the "hourglass/waiting" reaction (added when task was queued). */
+  hourglassReactionId?: string;
 }

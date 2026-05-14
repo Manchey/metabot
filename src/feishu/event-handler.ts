@@ -322,13 +322,6 @@ export function createEventDispatcher(
           }
         }
 
-        // Add reaction to indicate message received (e.g., "OK" = ✅)
-        if (messageSender) {
-          messageSender.addReaction(messageId, 'OK').catch((err) => {
-            logger.warn({ err, messageId }, 'Failed to add reaction (non-critical)');
-          });
-        }
-
         onMessage({ messageId, chatId, chatType, userId, text, imageKey, fileKey, fileName, extraMedia, threadId, rootId, parentMessageId });
       } catch (err) {
         logger.error({ err }, 'Error handling message event');
