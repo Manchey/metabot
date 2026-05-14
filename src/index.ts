@@ -290,7 +290,7 @@ async function main() {
   });
 
   // Graceful shutdown
-  const shutdown = () => {
+  const shutdown = async () => {
     logger.info('Shutting down...');
     scheduler.destroy();
     if (peerManager) {
@@ -306,14 +306,14 @@ async function main() {
       memoryServer.storage.close();
     }
     for (const handle of feishuHandles) {
-      handle.bridge.destroy();
+      await handle.bridge.destroy();
     }
     for (const handle of telegramHandles) {
-      handle.bridge.destroy();
+      await handle.bridge.destroy();
       handle.bot.stop();
     }
     for (const handle of wechatHandles) {
-      handle.bridge.destroy();
+      await handle.bridge.destroy();
       handle.stop();
     }
     process.exit(0);

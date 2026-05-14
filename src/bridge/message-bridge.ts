@@ -1653,19 +1653,36 @@ if (newSid) this.sessionManager.setSessionId(sessionKey, newSid, engineName);
     }
   }
 
-  destroy(): void {
+  async destroy(): Promise<void> {
     for (const [, batch] of this.pendingBatches) {
       clearTimeout(batch.timerId);
     }
     this.pendingBatches.clear();
-    for (const [chatId, task] of this.runningTasks) {
-      if (task.questionTimeoutId) {
-        clearTimeout(task.questionTimeoutId);
-      }
+
+    // Send error cards to all running tasks before aborting them
+    for (const [sessionKey, task] of this.runningTasks) {
+      if (task.questionTimeoutId) clearTimeout(task.questionTimeoutId);
+
+      // Build error state for the card
+      const errorState: CardState = {
+        status: 'error',
+        userPrompt: '',
+        responseText: '',
+        toolCalls: [],
+        errorMessage: '⚠️ 服务重启，任务中断。请重新发送消息继续。',
+        durationMs: Date.now() - task.startTime,
+      };
+
+      // Try to update the card (tolerate failures — we're shutting down)
+      try {
+        await this.sender.updateCard(task.cardMessageId, errorState);
+      } catch { /* best effort */ }
+
       task.executionHandle.finish();
       task.abortController.abort();
-      this.logger.info({ chatId }, 'Aborted running task during shutdown');
+      this.logger.info({ chatId: task.chatId }, 'Aborted running task during shutdown (error card sent)');
     }
+
     this.runningTasks.clear();
     this.startingSessions.clear();
     this.sessionManager.destroy();
