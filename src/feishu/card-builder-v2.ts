@@ -219,29 +219,35 @@ export function buildCardV2(state: CardState): string {
     });
   }
 
-  // Context usage — prominent display with emoji progress bar
-  if (state.totalTokens && state.contextWindow) {
-    const pct    = Math.round((state.totalTokens / state.contextWindow) * 100);
-    const tokensK = state.totalTokens >= 1000
-      ? `${(state.totalTokens / 1000).toFixed(1)}k`
-      : `${state.totalTokens}`;
-    const ctxK = `${Math.round(state.contextWindow / 1000)}k`;
-    const filled = Math.min(Math.round(pct / 10), 10);
-    const bar = '🟩'.repeat(filled) + '⬜'.repeat(10 - filled);
-    const warnIcon = pct >= 80 ? '🔴 ' : '';
-    elements.push({
-      tag:     'markdown',
-      content: `${warnIcon}📊 **ctx ${tokensK}/${ctxK} (${pct}%)**\n${bar}`,
-    });
-  }
+  // Stats footer — grey background panel
+  {
+    const footerLines: string[] = [];
 
-  // Stats footer — cost, model, duration (grey panel, only on complete/error)
-  if (state.status === 'complete' || state.status === 'error') {
-    const parts: string[] = [];
-    if (state.sessionCostUsd != null) parts.push(`$${state.sessionCostUsd.toFixed(2)}`);
-    if (state.model) parts.push(state.model.replace(/^claude-/, ''));
-    if (state.durationMs !== undefined) parts.push(`${(state.durationMs / 1000).toFixed(1)}s`);
-    if (parts.length > 0) {
+    // Context usage — bold + emoji progress bar, inside footer but prominent
+    if (state.totalTokens && state.contextWindow) {
+      const pct    = Math.round((state.totalTokens / state.contextWindow) * 100);
+      const tokensK = state.totalTokens >= 1000
+        ? `${(state.totalTokens / 1000).toFixed(1)}k`
+        : `${state.totalTokens}`;
+      const ctxK = `${Math.round(state.contextWindow / 1000)}k`;
+      const filled = Math.min(Math.round(pct / 10), 10);
+      const bar = '🟩'.repeat(filled) + '⬜'.repeat(10 - filled);
+      const warnIcon = pct >= 80 ? '🔴 ' : '';
+      footerLines.push(`${warnIcon}📊 **ctx ${tokensK}/${ctxK} (${pct}%)** ${bar}`);
+    }
+
+    // Cost, model, duration — subtle grey line (only on complete/error)
+    if (state.status === 'complete' || state.status === 'error') {
+      const parts: string[] = [];
+      if (state.sessionCostUsd != null) parts.push(`$${state.sessionCostUsd.toFixed(2)}`);
+      if (state.model) parts.push(state.model.replace(/^claude-/, ''));
+      if (state.durationMs !== undefined) parts.push(`${(state.durationMs / 1000).toFixed(1)}s`);
+      if (parts.length > 0) {
+        footerLines.push(`<font color="grey">${parts.join(' | ')}</font>`);
+      }
+    }
+
+    if (footerLines.length > 0) {
       elements.push({
         tag:               'column_set',
         background_style:  'grey',
@@ -257,7 +263,7 @@ export function buildCardV2(state: CardState): string {
             elements: [
               {
                 tag:        'markdown',
-                content:    `<font color="grey" size="${FOOTER_FONT_SIZE}">_${parts.join(' | ')}_</font>`,
+                content:    footerLines.join('\n'),
                 text_align: 'right',
               },
             ],
