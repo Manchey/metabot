@@ -9,6 +9,12 @@ export type {
 } from '../types.js';
 import type { CardState, CardStatus } from '../types.js';
 
+function buildCtxBar(pct: number): string {
+  const filled = Math.min(Math.round(pct / 10), 10);
+  const color = pct > 80 ? '🟥' : pct >= 50 ? '🟧' : '🟩';
+  return color.repeat(filled) + '⬜'.repeat(10 - filled);
+}
+
 const STATUS_CONFIG: Record<CardStatus, { color: string; title: string; icon: string }> = {
   thinking: { color: 'blue', title: 'Thinking...', icon: '🔵' },
   running: { color: 'blue', title: 'Running...', icon: '🔵' },
@@ -154,10 +160,8 @@ export function buildCard(state: CardState): string {
         ? `${(state.totalTokens / 1000).toFixed(1)}k`
         : `${state.totalTokens}`;
       const ctxK = `${Math.round(state.contextWindow / 1000)}k`;
-      const filled = Math.min(Math.round(pct / 10), 10);
-      const bar = '🟩'.repeat(filled) + '⬜'.repeat(10 - filled);
-      const warnIcon = pct >= 80 ? '🔴 ' : '';
-      parts.push(`${warnIcon}ctx ${tokensK}/${ctxK} (${pct}%) ${bar}`);
+      const bar = buildCtxBar(pct);
+      parts.push(`ctx ${tokensK}/${ctxK} (${pct}%) ${bar}`);
     }
     if (state.sessionCostUsd != null) {
       parts.push(`$${state.sessionCostUsd.toFixed(2)}`);

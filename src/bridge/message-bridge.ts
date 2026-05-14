@@ -1,3 +1,9 @@
+function buildCtxBar(pct: number): string {
+  const filled = Math.min(Math.round(pct / 10), 10);
+  const color = pct > 80 ? '🟥' : pct >= 50 ? '🟧' : '🟩';
+  return color.repeat(filled) + '⬜'.repeat(10 - filled);
+}
+
 import * as fs from 'node:fs';
 import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
@@ -1629,7 +1635,8 @@ if (newSid) this.sessionManager.setSessionId(sessionKey, newSid, engineName);
         ? `${(state.totalTokens / 1000).toFixed(1)}k`
         : `${state.totalTokens}`;
       const ctxK = `${Math.round(state.contextWindow / 1000)}k`;
-      usageStr = ` · ${tokensK}/${ctxK} (${pct}%)`;
+      const bar = buildCtxBar(pct);
+      usageStr = ` · ${tokensK}/${ctxK} (${pct}%) ${bar}`;
     } else if (state.totalTokens) {
       const tokensK = state.totalTokens >= 1000
         ? `${(state.totalTokens / 1000).toFixed(1)}k`
