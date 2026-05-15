@@ -142,6 +142,15 @@ export class WechatSender implements IMessageSender {
     return this.client.downloadMedia(encryptQueryParam, aesKey, savePath);
   }
 
+  // WeChat doesn't support reactions — return undefined/false as no-ops
+  async addReaction(_messageId: string, _emojiType: string): Promise<string | undefined> {
+    return undefined;
+  }
+
+  async removeReaction(_messageId: string, _reactionId: string): Promise<boolean> {
+    return false;
+  }
+
   // --- Rendering ---
 
   /** Progress message for new tool calls since last update. */

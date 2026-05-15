@@ -26,4 +26,10 @@ export class NullSender implements IMessageSender {
   async downloadFile(_messageId: string, _fileKey: string, _savePath: string): Promise<boolean> {
     return false;
   }
+  async addReaction(_messageId: string, _emojiType: string): Promise<string | undefined> {
+    return undefined;
+  }
+  async removeReaction(_messageId: string, _reactionId: string): Promise<boolean> {
+    return false;
+  }
 }

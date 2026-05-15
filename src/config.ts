@@ -12,8 +12,7 @@ export interface BotConfigBase {
   description?: string;
   specialties?: string[];
   icon?: string;
-  maxConcurrentTasks?: number;
-  budgetLimitDaily?: number;
+    budgetLimitDaily?: number;
   ttsVoice?: string;
   /** Agent engine. Defaults to 'claude' for backward compatibility. */
   engine?: EngineName;
@@ -173,8 +172,7 @@ export interface FeishuBotJsonEntry extends EngineJsonFields {
   description?: string;
   specialties?: string[];
   icon?: string;
-  maxConcurrentTasks?: number;
-  budgetLimitDaily?: number;
+    budgetLimitDaily?: number;
   ttsVoice?: string;
   feishuAppId: string;
   feishuAppSecret: string;
@@ -196,8 +194,7 @@ function feishuBotFromJson(entry: FeishuBotJsonEntry): BotConfig {
     ...(entry.description ? { description: entry.description } : {}),
     ...(entry.specialties?.length ? { specialties: entry.specialties } : {}),
     ...(entry.icon ? { icon: entry.icon } : {}),
-    ...(entry.maxConcurrentTasks != null ? { maxConcurrentTasks: entry.maxConcurrentTasks } : {}),
-    ...(entry.budgetLimitDaily != null ? { budgetLimitDaily: entry.budgetLimitDaily } : {}),
+        ...(entry.budgetLimitDaily != null ? { budgetLimitDaily: entry.budgetLimitDaily } : {}),
     ...(entry.ttsVoice ? { ttsVoice: entry.ttsVoice } : {}),
     ...(entry.groupNoMention ? { groupNoMention: true } : {}),
     ...(entry.engine ? { engine: entry.engine } : {}),
@@ -218,8 +215,7 @@ export interface TelegramBotJsonEntry extends EngineJsonFields {
   description?: string;
   specialties?: string[];
   icon?: string;
-  maxConcurrentTasks?: number;
-  budgetLimitDaily?: number;
+    budgetLimitDaily?: number;
   ttsVoice?: string;
   telegramBotToken: string;
   defaultWorkingDirectory: string;
@@ -238,8 +234,7 @@ function telegramBotFromJson(entry: TelegramBotJsonEntry): TelegramBotConfig {
     ...(entry.description ? { description: entry.description } : {}),
     ...(entry.specialties?.length ? { specialties: entry.specialties } : {}),
     ...(entry.icon ? { icon: entry.icon } : {}),
-    ...(entry.maxConcurrentTasks != null ? { maxConcurrentTasks: entry.maxConcurrentTasks } : {}),
-    ...(entry.budgetLimitDaily != null ? { budgetLimitDaily: entry.budgetLimitDaily } : {}),
+        ...(entry.budgetLimitDaily != null ? { budgetLimitDaily: entry.budgetLimitDaily } : {}),
     ...(entry.ttsVoice ? { ttsVoice: entry.ttsVoice } : {}),
     ...(entry.engine ? { engine: entry.engine } : {}),
     ...(entry.kimi ? { kimi: entry.kimi } : {}),
@@ -258,8 +253,7 @@ export interface WebBotJsonEntry extends EngineJsonFields {
   description?: string;
   specialties?: string[];
   icon?: string;
-  maxConcurrentTasks?: number;
-  budgetLimitDaily?: number;
+    budgetLimitDaily?: number;
   ttsVoice?: string;
   defaultWorkingDirectory: string;
   maxTurns?: number;
@@ -276,8 +270,7 @@ export function webBotFromJson(entry: WebBotJsonEntry): BotConfigBase {
     ...(entry.description ? { description: entry.description } : {}),
     ...(entry.specialties?.length ? { specialties: entry.specialties } : {}),
     ...(entry.icon ? { icon: entry.icon } : {}),
-    ...(entry.maxConcurrentTasks != null ? { maxConcurrentTasks: entry.maxConcurrentTasks } : {}),
-    ...(entry.budgetLimitDaily != null ? { budgetLimitDaily: entry.budgetLimitDaily } : {}),
+        ...(entry.budgetLimitDaily != null ? { budgetLimitDaily: entry.budgetLimitDaily } : {}),
     ...(entry.ttsVoice ? { ttsVoice: entry.ttsVoice } : {}),
     ...(entry.engine ? { engine: entry.engine } : {}),
     ...(entry.kimi ? { kimi: entry.kimi } : {}),
@@ -333,7 +326,7 @@ function buildClaudeConfig(entry: {
     defaultWorkingDirectory: expandUserPath(entry.defaultWorkingDirectory),
     maxTurns: entry.maxTurns ?? (process.env.CLAUDE_MAX_TURNS ? parseInt(process.env.CLAUDE_MAX_TURNS, 10) : undefined),
     maxBudgetUsd: entry.maxBudgetUsd ?? (process.env.CLAUDE_MAX_BUDGET_USD ? parseFloat(process.env.CLAUDE_MAX_BUDGET_USD) : undefined),
-    model: entry.model || process.env.CLAUDE_MODEL || process.env.ANTHROPIC_MODEL || 'claude-opus-4-7',
+    model: entry.model || process.env.CLAUDE_MODEL || process.env.ANTHROPIC_MODEL || undefined,
     apiKey: entry.apiKey || undefined,
     outputsBaseDir: entry.outputsBaseDir || process.env.OUTPUTS_BASE_DIR || path.join(os.tmpdir(), `metabot-outputs-${os.userInfo().username}`),
     downloadsDir: entry.downloadsDir || process.env.DOWNLOADS_DIR || path.join(os.tmpdir(), `metabot-downloads-${os.userInfo().username}`),
@@ -371,7 +364,7 @@ function feishuBotFromEnv(): BotConfig {
       defaultWorkingDirectory: expandUserPath(required('CLAUDE_DEFAULT_WORKING_DIRECTORY')),
       maxTurns: process.env.CLAUDE_MAX_TURNS ? parseInt(process.env.CLAUDE_MAX_TURNS, 10) : undefined,
       maxBudgetUsd: process.env.CLAUDE_MAX_BUDGET_USD ? parseFloat(process.env.CLAUDE_MAX_BUDGET_USD) : undefined,
-      model: process.env.CLAUDE_MODEL || 'claude-opus-4-7',
+      model: process.env.CLAUDE_MODEL || undefined,
       apiKey: undefined,
       outputsBaseDir: process.env.OUTPUTS_BASE_DIR || path.join(os.tmpdir(), `metabot-outputs-${os.userInfo().username}`),
       downloadsDir: process.env.DOWNLOADS_DIR || path.join(os.tmpdir(), `metabot-downloads-${os.userInfo().username}`),
@@ -392,7 +385,7 @@ function telegramBotFromEnv(): TelegramBotConfig {
       defaultWorkingDirectory: expandUserPath(required('CLAUDE_DEFAULT_WORKING_DIRECTORY')),
       maxTurns: process.env.CLAUDE_MAX_TURNS ? parseInt(process.env.CLAUDE_MAX_TURNS, 10) : undefined,
       maxBudgetUsd: process.env.CLAUDE_MAX_BUDGET_USD ? parseFloat(process.env.CLAUDE_MAX_BUDGET_USD) : undefined,
-      model: process.env.CLAUDE_MODEL || 'claude-opus-4-7',
+      model: process.env.CLAUDE_MODEL || undefined,
       apiKey: undefined,
       outputsBaseDir: process.env.OUTPUTS_BASE_DIR || path.join(os.tmpdir(), `metabot-outputs-${os.userInfo().username}`),
       downloadsDir: process.env.DOWNLOADS_DIR || path.join(os.tmpdir(), `metabot-downloads-${os.userInfo().username}`),
@@ -413,7 +406,7 @@ function wechatBotFromEnv(): WechatBotConfig {
       defaultWorkingDirectory: expandUserPath(required('CLAUDE_DEFAULT_WORKING_DIRECTORY')),
       maxTurns: process.env.CLAUDE_MAX_TURNS ? parseInt(process.env.CLAUDE_MAX_TURNS, 10) : undefined,
       maxBudgetUsd: process.env.CLAUDE_MAX_BUDGET_USD ? parseFloat(process.env.CLAUDE_MAX_BUDGET_USD) : undefined,
-      model: process.env.CLAUDE_MODEL || 'claude-opus-4-7',
+      model: process.env.CLAUDE_MODEL || undefined,
       apiKey: undefined,
       outputsBaseDir: expandUserPath(process.env.OUTPUTS_BASE_DIR || path.join(os.tmpdir(), `metabot-outputs-${os.userInfo().username}`)),
       downloadsDir: expandUserPath(process.env.DOWNLOADS_DIR || path.join(os.tmpdir(), `metabot-downloads-${os.userInfo().username}`)),

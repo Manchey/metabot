@@ -2,6 +2,7 @@ import * as lark from '@larksuiteoapi/node-sdk';
 import type { BotConfig } from '../config.js';
 import type { Logger } from '../utils/logger.js';
 import { MessageSender } from './message-sender.js';
+import { isNoMentionChat } from '../utils/no-mention-store.js';
 
 // Re-export from shared types so existing imports continue to work
 export type { IncomingMessage } from '../types.js';
@@ -68,6 +69,8 @@ async function isPrivateLikeGroup(chatId: string, sender: MessageSender): Promis
     memberCountCache.set(chatId, { count, ts: Date.now() });
     return count === 2;
   }
+  // API call failed — likely missing im:chat:readonly permission.
+  // Use /noMention command as a manual override.
   return false;
 }
 
@@ -155,15 +158,17 @@ export function createEventDispatcher(
         logger.debug({ messageId, threadId, rootId, parentMessageId }, 'Message thread info');
 
         // In group chats, only respond when the bot is @mentioned
-        // Exceptions: 2-member groups are treated like DMs; groupNoMention mode skips @mention check
+        // Exceptions: /noMention override; 2-member groups (private-like); groupNoMention mode
         const mentions = message.mentions;
         if (chatType === 'group') {
           const botMentioned = botOpenId
             ? mentions?.some((m: any) => m.id?.open_id === botOpenId)
             : mentions && mentions.length > 0;
           if (!botMentioned) {
-            // groupNoMention mode: respond to all messages without @mention
-            if (config.groupNoMention) {
+            // /noMention command override — user explicitly toggled this chat
+            if (isNoMentionChat(config.name, chatId)) {
+              logger.debug({ chatId }, '/noMention override, processing without @mention');
+            } else if (config.groupNoMention) {
               logger.debug({ chatId }, 'Group no-mention mode enabled, processing without @mention');
             } else if (messageSender && await isPrivateLikeGroup(chatId, messageSender)) {
               logger.debug({ chatId }, 'Private-like group (2 members), processing without @mention');
@@ -251,8 +256,31 @@ export function createEventDispatcher(
 
         // Common text cleanup for text and post messages
         if (msgType === 'text' || msgType === 'post') {
-          // Strip @mention tags (format: @_user_xxx or similar)
+          // Replace @mention tags with user names (only strip the bot's own @mention)
+        // Feishu text format: @_user_1 @张三 帮我看看
+        // mentions array: [{ key: "@_user_1", id: { open_id: "ou_xxx" }, name: "张三" }, ...]
+        if (mentions && Array.isArray(mentions)) {
+          for (const m of mentions) {
+            const key = m.key as string;
+            const mOpenId = m.id?.open_id as string;
+            const mName = m.name as string;
+            if (!key) continue;
+            if (botOpenId && mOpenId === botOpenId) {
+              // Strip bot's own @mention
+              text = text.replace(new RegExp(key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*', 'g'), '');
+            } else if (mName) {
+              // Replace other users' @mention with their display name
+              text = text.replace(new RegExp(key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*', 'g'), `@${mName} `);
+            } else {
+              // No name available, strip the placeholder
+              text = text.replace(new RegExp(key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*', 'g'), '');
+            }
+          }
+          text = text.trim();
+        } else {
+          // No mention data available, strip all @_xxx placeholders
           text = text.replace(/@_\w+\s*/g, '').trim();
+        }
 
           // Strip Feishu auto-generated markdown links: [text](url) → text
           text = text.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
@@ -292,13 +320,6 @@ export function createEventDispatcher(
             clearCachedMedia(chatId, userId);
             logger.info({ chatId, userId, mediaCount: cached.length }, 'Attached cached media to @mention message');
           }
-        }
-
-        // Add reaction to indicate message received (e.g., "OK" = ✅)
-        if (messageSender) {
-          messageSender.addReaction(messageId, 'OK').catch((err) => {
-            logger.warn({ err, messageId }, 'Failed to add reaction (non-critical)');
-          });
         }
 
         onMessage({ messageId, chatId, chatType, userId, text, imageKey, fileKey, fileName, extraMedia, threadId, rootId, parentMessageId });

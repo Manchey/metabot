@@ -21,6 +21,21 @@ npm run lint         # ESLint check
 npm run format       # Prettier format
 ```
 
+## Deployment
+
+MetaBot is deployed via **systemd**. After building (`npm run build`), restart with:
+
+```bash
+sudo systemctl restart metabot
+```
+
+Check status/logs:
+
+```bash
+sudo systemctl status metabot
+sudo journalctl -u metabot --since "5 min ago" -f
+```
+
 ## Architecture
 
 The app is a TypeScript ESM project (`"type": "module"`, all imports use `.js` extensions). It connects to Feishu via WebSocket (long connection, no public IP needed) and calls Claude via the `@anthropic-ai/claude-agent-sdk`.

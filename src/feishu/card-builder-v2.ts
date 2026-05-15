@@ -119,15 +119,32 @@ export function buildCardV2(state: CardState): string {
 
   // Tool calls section
   if (state.toolCalls.length > 0) {
-    const toolLines = state.toolCalls.map((t) => {
-      const icon = t.status === 'running' ? '⏳' : '✅';
-      return `${icon} **${t.name}** ${t.detail}`;
-    });
-    elements.push({
-      tag:     'markdown',
-      content: toolLines.join('\n'),
-    });
-    elements.push({ tag: 'hr' });
+    const isFinal = state.status === 'complete' || state.status === 'error';
+    if (isFinal) {
+      // Final card: show only a one-line summary
+      const counts = new Map<string, number>();
+      for (const t of state.toolCalls) counts.set(t.name, (counts.get(t.name) ?? 0) + 1);
+      const parts = Array.from(counts.entries())
+        .sort((a, b) => b[1] - a[1])
+        .map(([name, count]) => `${name}×${count}`);
+      const summary = `✅ **${state.toolCalls.length} tools** (${parts.join(', ')})`;
+      elements.push({
+        tag:     'markdown',
+        content: summary,
+      });
+      elements.push({ tag: 'hr' });
+    } else {
+      // Streaming: show individual tool calls with status
+      const toolLines = state.toolCalls.map((t) => {
+        const icon = t.status === 'running' ? '⏳' : '✅';
+        return `${icon} **${t.name}** ${t.detail}`;
+      });
+      elements.push({
+        tag:     'markdown',
+        content: toolLines.join('\n'),
+      });
+      elements.push({ tag: 'hr' });
+    }
   }
 
   // Background tasks (Monitor, etc.)
@@ -204,21 +221,31 @@ export function buildCardV2(state: CardState): string {
 
   // Stats footer — grey background panel
   {
-    const parts: string[] = [];
+
+    // Context usage + cost/model/duration — single footer line
+    const footerParts: string[] = [];
     if (state.totalTokens && state.contextWindow) {
       const pct    = Math.round((state.totalTokens / state.contextWindow) * 100);
       const tokensK = state.totalTokens >= 1000
         ? `${(state.totalTokens / 1000).toFixed(1)}k`
         : `${state.totalTokens}`;
       const ctxK = `${Math.round(state.contextWindow / 1000)}k`;
-      parts.push(`ctx: ${tokensK}/${ctxK} (${pct}%)`);
+      const filled = Math.min(Math.round(pct / 10), 10);
+      const bar = '🟩'.repeat(filled) + '⬜'.repeat(10 - filled);
+      const warnIcon = pct >= 80 ? '🔴 ' : '';
+      footerParts.push(`${warnIcon}ctx ${tokensK}/${ctxK} (${pct}%) ${bar}`);
     }
+
+    // Cost, model, duration — subtle grey (only on complete/error)
     if (state.status === 'complete' || state.status === 'error') {
+      const parts: string[] = [];
       if (state.sessionCostUsd != null) parts.push(`$${state.sessionCostUsd.toFixed(2)}`);
       if (state.model) parts.push(state.model.replace(/^claude-/, ''));
       if (state.durationMs !== undefined) parts.push(`${(state.durationMs / 1000).toFixed(1)}s`);
+      if (parts.length > 0) footerParts.push(parts.join(' | '));
     }
-    if (parts.length > 0) {
+
+    if (footerParts.length > 0) {
       elements.push({
         tag:               'column_set',
         background_style:  'grey',
@@ -234,7 +261,7 @@ export function buildCardV2(state: CardState): string {
             elements: [
               {
                 tag:        'markdown',
-                content:    `<font color="grey" size="${FOOTER_FONT_SIZE}">_${parts.join(' | ')}_</font>`,
+                content:    footerParts.join(' | '),
                 text_align: 'right',
               },
             ],

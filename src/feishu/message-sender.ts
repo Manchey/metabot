@@ -67,8 +67,10 @@ export class MessageSender {
         data: { content: cardContent },
       });
       return true;
-    } catch (err) {
-      this.logger.error({ err, messageId }, 'Failed to update card');
+    } catch (err: any) {
+      const apiMsg = err?.msg || err?.message || String(err);
+      const apiCode = err?.code || err?.error?.code;
+      this.logger.error({ err, messageId, apiCode, apiMsg, contentLen: cardContent?.length }, 'Failed to update card');
       return false;
     }
   }
@@ -155,6 +157,37 @@ export class MessageSender {
     return this.sendImage(chatId, imageKey);
   }
 
+  /**
+   * Reply to a message with an image, optionally in a thread.
+   * Uploads the image first, then replies with the image_key.
+   */
+  async replyImageFile(messageId: string, filePath: string, replyInThread: boolean = true): Promise<boolean> {
+    const imageKey = await this.uploadImage(filePath);
+    if (!imageKey) return false;
+    return this.replyImage(messageId, imageKey, replyInThread);
+  }
+
+  /**
+   * Reply to a message with an image key, optionally in a thread.
+   */
+  async replyImage(messageId: string, imageKey: string, replyInThread: boolean = true): Promise<boolean> {
+    try {
+      await this.client.im.v1.message.reply({
+        path: { message_id: messageId },
+        data: {
+          content: JSON.stringify({ image_key: imageKey }),
+          msg_type: 'image',
+          reply_in_thread: replyInThread,
+        },
+      });
+      this.logger.info({ messageId, imageKey, replyInThread }, 'Image reply sent');
+      return true;
+    } catch (err) {
+      this.logger.error({ err, messageId, imageKey, replyInThread }, 'Failed to reply image');
+      return false;
+    }
+  }
+
   async uploadFile(filePath: string, fileName: string, fileType: string): Promise<string | undefined> {
     try {
       const resp = await this.client.im.v1.file.create({
@@ -198,6 +231,37 @@ export class MessageSender {
     return this.sendFile(chatId, fileKey);
   }
 
+  /**
+   * Reply to a message with a file, optionally in a thread.
+   * Uploads the file first, then replies with the file_key.
+   */
+  async replyLocalFile(messageId: string, filePath: string, fileName: string, fileType: string, replyInThread: boolean = true): Promise<boolean> {
+    const fileKey = await this.uploadFile(filePath, fileName, fileType);
+    if (!fileKey) return false;
+    return this.replyFile(messageId, fileKey, replyInThread);
+  }
+
+  /**
+   * Reply to a message with a file key, optionally in a thread.
+   */
+  async replyFile(messageId: string, fileKey: string, replyInThread: boolean = true): Promise<boolean> {
+    try {
+      await this.client.im.v1.message.reply({
+        path: { message_id: messageId },
+        data: {
+          content: JSON.stringify({ file_key: fileKey }),
+          msg_type: 'file',
+          reply_in_thread: replyInThread,
+        },
+      });
+      this.logger.info({ messageId, fileKey, replyInThread }, 'File reply sent');
+      return true;
+    } catch (err) {
+      this.logger.error({ err, messageId, fileKey, replyInThread }, 'Failed to reply file');
+      return false;
+    }
+  }
+
   async getChatMemberCount(chatId: string): Promise<number | undefined> {
     try {
       const resp: any = await this.client.im.v1.chat.get({
@@ -205,9 +269,11 @@ export class MessageSender {
       });
       const userCount = parseInt(resp?.data?.user_count, 10) || 0;
       const botCount = parseInt(resp?.data?.bot_count, 10) || 0;
-      return userCount + botCount;
+      const total = userCount + botCount;
+      this.logger.debug({ chatId, userCount, botCount, total }, 'Chat member count retrieved');
+      return total;
     } catch (err) {
-      this.logger.error({ err, chatId }, 'Failed to get chat member count');
+      this.logger.error({ err, chatId }, 'Failed to get chat member count (may need im:chat:readonly permission)');
       return undefined;
     }
   }
@@ -252,21 +318,41 @@ export class MessageSender {
   /**
    * Add an emoji reaction to a message.
    * @param messageId - The message ID to add reaction to
-   * @param emojiType - Emoji type, e.g. "OK", "DONE", "THUMBSUP", "HEART"
-   * @returns true if successful, false otherwise
+   * @param emojiType - Emoji type, e.g. "OK", "DONE", "THUMBSUP", "HEART", "HOURGLASS"
+   * @returns reaction_id if successful, undefined otherwise
    */
-  async addReaction(messageId: string, emojiType: string): Promise<boolean> {
+  async addReaction(messageId: string, emojiType: string): Promise<string | undefined> {
     try {
-      await this.client.im.v1.messageReaction.create({
+      const resp = await this.client.im.v1.messageReaction.create({
         path: { message_id: messageId },
         data: {
           reaction_type: { emoji_type: emojiType },
         },
       });
-      this.logger.info({ messageId, emojiType }, 'Reaction added to message');
-      return true;
+      const reactionId = resp?.data?.reaction_id;
+      this.logger.info({ messageId, emojiType, reactionId }, 'Reaction added to message');
+      return reactionId;
     } catch (err) {
       this.logger.error({ err, messageId, emojiType }, 'Failed to add reaction');
+      return undefined;
+    }
+  }
+
+  /**
+   * Remove an emoji reaction from a message.
+   * @param messageId - The message ID the reaction is on
+   * @param reactionId - The reaction ID to remove (obtained from addReaction response)
+   * @returns true if successful, false otherwise
+   */
+  async removeReaction(messageId: string, reactionId: string): Promise<boolean> {
+    try {
+      await this.client.im.v1.messageReaction.delete({
+        path: { message_id: messageId, reaction_id: reactionId },
+      });
+      this.logger.info({ messageId, reactionId }, 'Reaction removed from message');
+      return true;
+    } catch (err) {
+      this.logger.error({ err, messageId, reactionId }, 'Failed to remove reaction');
       return false;
     }
   }
