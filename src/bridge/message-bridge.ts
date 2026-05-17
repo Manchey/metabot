@@ -88,6 +88,8 @@ export interface ApiTaskOptions {
   groupMembers?: string[];
   /** Group ID — used for inter-bot communication chatId pattern. */
   groupId?: string;
+  /** Message ID to reply to (for thread reply in scheduled tasks). If provided and sender supports replyCard, the initial card is sent as a thread reply. */
+  replyToMessageId?: string;
 }
 
 export interface ApiTaskResult {
@@ -1204,7 +1206,12 @@ if (newSid) this.sessionManager.setSessionId(sessionKey, newSid, engineName);
 
     let messageId: string | undefined;
     if (sendCards) {
-      messageId = await this.sender.sendCard(chatId, initialState);
+      // If replyToMessageId is provided and sender supports replyCard, send as thread reply
+      if (options.replyToMessageId && this.sender.replyCard) {
+        messageId = await this.sender.replyCard(options.replyToMessageId, initialState, true);
+      } else {
+        messageId = await this.sender.sendCard(chatId, initialState);
+      }
     }
 
     // Generate a messageId for onUpdate even if sendCards is false

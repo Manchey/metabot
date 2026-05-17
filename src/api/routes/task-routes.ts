@@ -242,6 +242,7 @@ export async function handleTaskRoutes(
     const sendCards = body.sendCards as boolean | undefined;
     const label = body.label as string | undefined;
     const timezone = body.timezone as string | undefined;
+    const originMessageId = body.originMessageId as string | undefined;
 
     if (!botName || !chatId || !prompt) {
       jsonResponse(res, 400, { error: 'Missing required fields: botName, chatId, prompt' });
@@ -256,20 +257,20 @@ export async function handleTaskRoutes(
 
     if (cronExpr) {
       const recurring = scheduler.scheduleRecurring({
-        botName, chatId, prompt, cronExpr, timezone, sendCards, label,
+        botName, chatId, prompt, cronExpr, timezone, sendCards, label, originMessageId,
       });
       jsonResponse(res, 201, {
         id: recurring.id, type: 'recurring', botName: recurring.botName,
         chatId: recurring.chatId, prompt: recurring.prompt, cronExpr: recurring.cronExpr,
         timezone: recurring.timezone, nextExecuteAt: new Date(recurring.nextExecuteAt).toISOString(),
-        sendCards: recurring.sendCards, label: recurring.label, status: recurring.status,
+        sendCards: recurring.sendCards, label: recurring.label, originMessageId: recurring.originMessageId, status: recurring.status,
       });
     } else if (typeof delaySeconds === 'number' && delaySeconds > 0) {
-      const task = scheduler.scheduleTask({ botName, chatId, prompt, delaySeconds, sendCards, label });
+      const task = scheduler.scheduleTask({ botName, chatId, prompt, delaySeconds, sendCards, label, originMessageId });
       jsonResponse(res, 201, {
         id: task.id, type: 'one-time', botName: task.botName, chatId: task.chatId,
         prompt: task.prompt, executeAt: new Date(task.executeAt).toISOString(),
-        sendCards: task.sendCards, label: task.label, status: task.status,
+        sendCards: task.sendCards, label: task.label, originMessageId: task.originMessageId, status: task.status,
       });
     } else {
       jsonResponse(res, 400, { error: 'Provide either cronExpr (recurring) or delaySeconds (one-time, positive number)' });

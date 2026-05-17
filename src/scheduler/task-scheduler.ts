@@ -18,6 +18,7 @@ export interface ScheduledTask {
   executeAt: number;       // Unix ms
   sendCards: boolean;
   label?: string;
+  originMessageId?: string; // messageId of the user message that created this task — used for thread reply
   status: 'pending' | 'executing' | 'completed' | 'failed' | 'cancelled';
   createdAt: number;
   retryCount: number;
@@ -31,6 +32,7 @@ export interface ScheduleInput {
   delaySeconds: number;
   sendCards?: boolean;
   label?: string;
+  originMessageId?: string; // messageId of the user message that created this task
 }
 
 export interface ScheduleUpdateInput {
@@ -51,6 +53,7 @@ export interface RecurringTask {
   timezone: string;           // IANA timezone, e.g. "Asia/Shanghai"
   sendCards: boolean;
   label?: string;
+  originMessageId?: string;   // messageId of the user message that created this task — used for thread reply
   status: 'active' | 'paused' | 'cancelled';
   createdAt: number;          // Unix ms
   nextExecuteAt: number;      // Unix ms — precomputed next fire time
@@ -66,6 +69,7 @@ export interface RecurringScheduleInput {
   timezone?: string;
   sendCards?: boolean;
   label?: string;
+  originMessageId?: string; // messageId of the user message that created this task
 }
 
 export interface RecurringUpdateInput {
@@ -127,6 +131,7 @@ export class TaskScheduler {
       executeAt: now + input.delaySeconds * 1000,
       sendCards: input.sendCards ?? true,
       label: input.label,
+      originMessageId: input.originMessageId,
       status: 'pending',
       createdAt: now,
       retryCount: 0,
@@ -205,6 +210,7 @@ export class TaskScheduler {
       timezone: tz,
       sendCards: input.sendCards ?? true,
       label: input.label,
+      originMessageId: input.originMessageId,
       status: 'active',
       createdAt: now,
       nextExecuteAt: nextMs,
@@ -384,7 +390,17 @@ export class TaskScheduler {
     // Execute the task
     task.status = 'executing';
     this.saveToDisk();
-    this.logger.info({ taskId: id, botName: task.botName, chatId: task.chatId }, 'Firing scheduled task');
+    this.logger.info({ taskId: id, botName: task.botName, chatId: task.chatId, originMessageId: task.originMessageId }, 'Firing scheduled task');
+
+    // Add HOURGLASS reaction to origin message to indicate task is running
+    let hourglassReactionId: string | undefined;
+    if (task.originMessageId) {
+      try {
+        hourglassReactionId = await bot.sender.addReaction(task.originMessageId, 'HOURGLASS');
+      } catch (err) {
+        this.logger.warn({ err, taskId: id, originMessageId: task.originMessageId }, 'Failed to add HOURGLASS reaction');
+      }
+    }
 
     // Generate a messageId for WebSocket streaming
     const messageId = `sched_${task.id}`;
@@ -395,6 +411,7 @@ export class TaskScheduler {
         chatId: task.chatId,
         userId: 'scheduler',
         sendCards: task.sendCards,
+        replyToMessageId: task.originMessageId,
         onUpdate: (state: CardState, _bridgeMessageId: string, final: boolean) => {
           // Stream updates to any WebSocket client subscribed to this chatId
           if (this.wsHandle) {
@@ -413,6 +430,20 @@ export class TaskScheduler {
     } catch (err: any) {
       this.logger.error({ err, taskId: id }, 'Scheduled task execution error');
       task.status = 'failed';
+    }
+
+    // Remove HOURGLASS reaction and add completion reaction
+    if (task.originMessageId) {
+      try {
+        if (hourglassReactionId) {
+          await bot.sender.removeReaction(task.originMessageId, hourglassReactionId);
+        }
+        if (task.status === 'completed') {
+          await bot.sender.addReaction(task.originMessageId, 'DONE');
+        }
+      } catch (err) {
+        this.logger.warn({ err, taskId: id, originMessageId: task.originMessageId }, 'Failed to update completion reaction');
+      }
     }
 
     this.saveToDisk();
@@ -454,6 +485,7 @@ export class TaskScheduler {
       executeAt: Date.now(),
       sendCards: recurring.sendCards,
       label: recurring.label ? `${recurring.label} (recurring)` : undefined,
+      originMessageId: recurring.originMessageId,
       status: 'pending',
       createdAt: Date.now(),
       retryCount: 0,

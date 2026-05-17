@@ -28,10 +28,12 @@ mb peers                                   # List peers and their status
 # Scheduling (one-time)
 mb schedule list                           # List all scheduled tasks
 mb schedule add <bot> <chatId> <sec> <prompt>  # Schedule a one-time future task
+mb schedule add <bot> <chatId> <sec> <prompt> --origin <msgId>  # Reply in thread
 mb schedule cancel <id>                    # Cancel a scheduled task
 
 # Scheduling (recurring / cron)
 mb schedule cron <bot> <chatId> '<cronExpr>' <prompt>  # Create recurring task
+mb schedule cron <bot> <chatId> '<cronExpr>' <prompt> --origin <msgId>  # Reply in thread
 mb schedule pause <id>                     # Pause a recurring task
 mb schedule resume <id>                    # Resume a paused recurring task
 
@@ -116,6 +118,13 @@ curl -s -X POST http://localhost:${METABOT_API_PORT:-9100}/api/schedule \
   -H "Authorization: Bearer $METABOT_API_SECRET" \
   -H "Content-Type: application/json" \
   -d '{"botName":"<bot>","chatId":"<chatId>","prompt":"<task>","cronExpr":"0 8 * * 1-5","timezone":"Asia/Shanghai","label":"Daily report"}'
+```
+The `originMessageId` field (optional) makes the task reply into the thread of the original message. When provided, the bot adds a ⌛ reaction to the origin message while executing, then removes it and adds ✅ on completion. The result card appears as a thread reply instead of a standalone message:
+```bash
+curl -s -X POST http://localhost:${METABOT_API_PORT:-9100}/api/schedule \
+  -H "Authorization: Bearer $METABOT_API_SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{"botName":"<bot>","chatId":"<chatId>","prompt":"<task>","originMessageId":"<msgId>","cronExpr":"0 8 * * 1-5","timezone":"Asia/Shanghai","label":"Daily report"}'
 ```
 Cron format: `minute hour day month weekday` (5 fields). Examples: `0 8 * * *` = daily 8am, `0 8 * * 1-5` = weekdays 8am, `*/30 * * * *` = every 30 min. Default timezone: Asia/Shanghai.
 
