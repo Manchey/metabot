@@ -7,6 +7,7 @@ import type { EngineName } from '../engines/index.js';
 import { MemoryClient } from '../memory/memory-client.js';
 import { AuditLogger } from '../utils/audit-logger.js';
 import type { DocSync } from '../sync/doc-sync.js';
+import type { ActivityStore } from '../api/activity-store.js';
 import { addNoMentionChat, removeNoMentionChat, isNoMentionChat } from '../utils/no-mention-store.js';
 
 /** Helper function type for sending thread-aware notice replies. */
@@ -14,6 +15,7 @@ type ReplyNotice = (title: string, content: string, color?: string) => Promise<v
 
 export class CommandHandler {
   private docSync: DocSync | null = null;
+  private activityStore: ActivityStore | null = null;
 
   constructor(
     private config: BotConfigBase,
@@ -24,11 +26,17 @@ export class CommandHandler {
     private audit: AuditLogger,
     private getRunningTask: (sessionKey: string) => { startTime: number } | undefined,
     private stopTask: (sessionKey: string) => void,
+    private getRunningTasksInfo: () => Array<{ chatId: string; userId?: string; startTime: number }>,
   ) {}
 
   /** Set the doc sync service (optional, only available for Feishu bots). */
   setDocSync(docSync: DocSync): void {
     this.docSync = docSync;
+  }
+
+  /** Set the activity store (for /ps command). */
+  setActivityStore(store: ActivityStore): void {
+    this.activityStore = store;
   }
 
   /** Returns true if the message was handled as a command, false otherwise. */
@@ -65,6 +73,8 @@ export class CommandHandler {
           '`/model claude`, `/model kimi`, or `/model codex` - Switch engine (resets session)',
           '`/model <name>` - Set model for current engine',
           '`/noMention` - Skip @mention requirement in this chat (2-member groups)',
+          '`/ps` - Show conversation history (default: 1 day)',
+          '`/ps 3h` / `/ps 7d` / `/ps 30m` - Customize time range',
           '`/memory` - Memory document commands',
           '`/help` - Show this help message',
           '',
@@ -133,6 +143,12 @@ export class CommandHandler {
       case '/model': {
         const args = text.slice('/model'.length).trim();
         await this.handleModelCommand(sessionKey, args, replyNotice);
+        return true;
+      }
+
+      case '/ps': {
+        const args = text.slice('/ps'.length).trim();
+        await this.handlePsCommand(args, replyNotice);
         return true;
       }
 
@@ -266,6 +282,94 @@ export class CommandHandler {
       default:
         await replyNotice('📝 Sync', 'Usage:\n- `/sync` — Sync all documents to Feishu Wiki\n- `/sync status` — Show sync status', 'blue');
     }
+  }
+
+  private async handlePsCommand(args: string, replyNotice: ReplyNotice): Promise<void> {
+    if (!this.activityStore) {
+      await replyNotice('❌ Activity Store Unavailable', 'The activity store is not configured for this bot.', 'red');
+      return;
+    }
+
+    // Parse time suffix: /ps 3h, /ps 7d, /ps 30m, /ps (default 1d)
+    let sinceMs = 24 * 60 * 60 * 1000; // default: 1 day
+    if (args) {
+      const match = args.match(/^(\d+)(m|h|d)$/);
+      if (match) {
+        const num = parseInt(match[1], 10);
+        const unit = match[2];
+        sinceMs = unit === 'm' ? num * 60 * 1000 : unit === 'h' ? num * 60 * 60 * 1000 : num * 24 * 60 * 60 * 1000;
+      } else {
+        await replyNotice('📝 PS', 'Usage:\n- `/ps` — Last 1 day (default)\n- `/ps 3h` — Last 3 hours\n- `/ps 7d` — Last 7 days\n- `/ps 30m` — Last 30 minutes', 'blue');
+        return;
+      }
+    }
+
+    const since = Date.now() - sinceMs;
+    const summary = this.activityStore.getSummary({ botName: this.config.name, since });
+    const runningTasks = this.getRunningTasksInfo();
+
+    // Resolve user names if possible
+    const allUserIds = [...summary.users.map(u => u.userId), ...runningTasks.filter(t => t.userId).map(t => t.userId!)];
+    const nameMap = new Map<string, string>();
+    if (this.sender.resolveUserNames && allUserIds.length > 0) {
+      try {
+        const resolved = await this.sender.resolveUserNames(allUserIds);
+        for (const [id, name] of resolved) {
+          nameMap.set(id, name);
+        }
+      } catch {
+        // Fall back to raw IDs
+      }
+    }
+    const displayName = (id: string) => nameMap.get(id) || id;
+
+    // Format time period
+    const periodLabel = sinceMs >= 24 * 60 * 60 * 1000
+      ? `${Math.round(sinceMs / (24 * 60 * 60 * 1000))} day(s)`
+      : sinceMs >= 60 * 60 * 1000
+        ? `${Math.round(sinceMs / (60 * 60 * 1000))} hour(s)`
+        : `${Math.round(sinceMs / (60 * 1000))} minute(s)`;
+
+    const lines: string[] = [];
+    lines.push(`**Period:** Last ${periodLabel}`);
+    lines.push(`**Tasks:** ${summary.totalTasks} (${summary.completedTasks} completed, ${summary.failedTasks} failed)`);
+    lines.push(`**Total Cost:** $${summary.totalCostUsd.toFixed(2)}`);
+
+    if (summary.users.length > 0) {
+      lines.push('');
+      lines.push('| User | # | Last Prompt | Cost |');
+      lines.push('|------|---|-------------|------|');
+      for (const u of summary.users.slice(0, 20)) {
+        const name = displayName(u.userId);
+        const prompt = u.lastPrompt ? (u.lastPrompt.length > 40 ? u.lastPrompt.slice(0, 37) + '...' : u.lastPrompt) : '-';
+        lines.push(`| ${name} | ${u.taskCount} | ${prompt} | $${u.totalCostUsd.toFixed(2)} |`);
+      }
+      if (summary.users.length > 20) {
+        lines.push(`| ... and ${summary.users.length - 20} more | | | |`);
+      }
+    }
+
+    if (runningTasks.length > 0) {
+      lines.push('');
+      lines.push('**Running Tasks:**');
+      for (const t of runningTasks) {
+        const name = t.userId ? displayName(t.userId) : 'unknown';
+        const durationMs = Date.now() - t.startTime;
+        const duration = durationMs >= 60 * 60 * 1000
+          ? `${Math.round(durationMs / (60 * 60 * 1000))}h`
+          : durationMs >= 60 * 1000
+            ? `${Math.round(durationMs / (60 * 1000))}m`
+            : `${Math.round(durationMs / 1000)}s`;
+        lines.push(`- ${name} in \`${t.chatId}\` (${duration})`);
+      }
+    }
+
+    if (summary.totalTasks === 0 && runningTasks.length === 0) {
+      lines.push('');
+      lines.push('_No activity in this period._');
+    }
+
+    await replyNotice('📊 Activity Summary', lines.join('\n'));
   }
 
   private async handleModelCommand(sessionKey: string, args: string, replyNotice: ReplyNotice): Promise<void> {

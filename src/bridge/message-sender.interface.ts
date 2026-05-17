@@ -52,4 +52,7 @@ export interface IMessageSender {
 
   /** If true, the bridge will not send a separate "Task completed" text after the card update. */
   skipCompletionNotice?: boolean;
+
+  /** Resolve user IDs to display names. Returns a Map of userId → displayName. Falls back to raw IDs if unavailable. */
+  resolveUserNames?(userIds: string[]): Promise<Map<string, string>>;
 }

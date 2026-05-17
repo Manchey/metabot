@@ -23,6 +23,25 @@ export interface ActivityEvent {
   timestamp: number;
 }
 
+export interface UserActivitySummary {
+  userId: string;
+  taskCount: number;
+  completedCount: number;
+  failedCount: number;
+  totalCostUsd: number;
+  lastPrompt?: string;
+  lastActivityTime: number;
+}
+
+export interface ActivitySummary {
+  since: number;
+  totalTasks: number;
+  completedTasks: number;
+  failedTasks: number;
+  totalCostUsd: number;
+  users: UserActivitySummary[];
+}
+
 const MAX_BUFFER_SIZE = 100;
 const MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
@@ -126,6 +145,63 @@ export class ActivityStore {
     if (result.changes > 0) {
       this.logger.info({ deleted: result.changes }, 'Activity store cleanup');
     }
+  }
+
+  /** Get aggregated activity summary grouped by user for a given time range. */
+  getSummary(opts: { botName?: string; since?: number } = {}): ActivitySummary {
+    const { botName, since = Date.now() - 24 * 60 * 60 * 1000 } = opts;
+
+    const overallRow = this.db.prepare(`
+      SELECT
+        COUNT(*) AS total_tasks,
+        SUM(CASE WHEN type = 'task_completed' THEN 1 ELSE 0 END) AS completed_tasks,
+        SUM(CASE WHEN type = 'task_failed' THEN 1 ELSE 0 END) AS failed_tasks,
+        COALESCE(SUM(cost_usd), 0) AS total_cost_usd
+      FROM activity_events
+      WHERE timestamp > ?${botName ? ' AND bot_name = ?' : ''}
+    `).get(...(botName ? [since, botName] : [since])) as any;
+
+    const userRows = this.db.prepare(`
+      SELECT
+        user_id,
+        COUNT(*) AS task_count,
+        SUM(CASE WHEN type = 'task_completed' THEN 1 ELSE 0 END) AS completed_count,
+        SUM(CASE WHEN type = 'task_failed' THEN 1 ELSE 0 END) AS failed_count,
+        COALESCE(SUM(cost_usd), 0) AS total_cost_usd,
+        MAX(timestamp) AS last_activity_time
+      FROM activity_events
+      WHERE timestamp > ?${botName ? ' AND bot_name = ?' : ''} AND user_id IS NOT NULL
+      GROUP BY user_id
+      ORDER BY last_activity_time DESC
+    `).all(...(botName ? [since, botName] : [since])) as any[];
+
+    // Fetch the last prompt for each user
+    const users: UserActivitySummary[] = userRows.map((row: any) => {
+      const lastPromptRow = this.db.prepare(`
+        SELECT prompt FROM activity_events
+        WHERE user_id = ? AND timestamp > ?${botName ? ' AND bot_name = ?' : ''} AND prompt IS NOT NULL
+        ORDER BY timestamp DESC LIMIT 1
+      `).get(...(botName ? [row.user_id, since, botName] : [row.user_id, since])) as any;
+
+      return {
+        userId: row.user_id,
+        taskCount: row.task_count,
+        completedCount: row.completed_count,
+        failedCount: row.failed_count,
+        totalCostUsd: row.total_cost_usd,
+        lastPrompt: lastPromptRow?.prompt || undefined,
+        lastActivityTime: row.last_activity_time,
+      };
+    });
+
+    return {
+      since,
+      totalTasks: overallRow?.total_tasks ?? 0,
+      completedTasks: overallRow?.completed_tasks ?? 0,
+      failedTasks: overallRow?.failed_tasks ?? 0,
+      totalCostUsd: overallRow?.total_cost_usd ?? 0,
+      users,
+    };
   }
 
   close(): void {

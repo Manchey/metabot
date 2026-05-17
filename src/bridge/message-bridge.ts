@@ -55,6 +55,7 @@ interface RunningTask {
   processor: StreamProcessor;
   rateLimiter: RateLimiter;
   chatId: string;
+  userId?: string;
   /** Session key for thread-aware session management (format: chatId:threadKey) */
   sessionKey: string;
   /** Thread ID for topic-based conversation continuity */
@@ -156,6 +157,7 @@ export class MessageBridge {
       config, logger, sender, this.sessionManager, memoryClient, this.audit,
       (sessionKey) => this.runningTasks.get(sessionKey),
       (sessionKey) => this.stopTask(sessionKey),
+      () => this.getRunningTasksInfo(),
     );
 
     this.outputHandler = new OutputHandler(logger, sender, this.outputsManager);
@@ -231,6 +233,11 @@ export class MessageBridge {
     this.commandHandler.setDocSync(docSync);
   }
 
+  /** Inject the activity store for /ps command. */
+  setActivityStore(store: import('../api/activity-store.js').ActivityStore): void {
+    this.commandHandler.setActivityStore(store);
+  }
+
   /** Inject the session registry for cross-platform session sync. */
   setSessionRegistry(registry: SessionRegistry): void {
     this.sessionRegistry = registry;
@@ -260,9 +267,10 @@ export class MessageBridge {
   }
 
   /** Return info about all currently running tasks (for team status display). */
-  getRunningTasksInfo(): Array<{ chatId: string; startTime: number }> {
+  getRunningTasksInfo(): Array<{ chatId: string; userId?: string; startTime: number }> {
     return Array.from(this.runningTasks.entries()).map(([_sessionKey, task]) => ({
       chatId: task.chatId,
+      userId: task.userId,
       startTime: task.startTime,
     }));
   }
@@ -831,6 +839,7 @@ const { userId, chatId, text, imageKey, fileKey, fileName, messageId: msgId, thr
       processor,
       rateLimiter,
       chatId,
+      userId,
       sessionKey,
       threadId: threadKey,
       userMessageId: msgId,
@@ -1244,6 +1253,7 @@ if (newSid) this.sessionManager.setSessionId(sessionKey, newSid, engineName);
       processor,
       rateLimiter,
       chatId,
+      userId,
       sessionKey: chatId, // API tasks don't have thread context, use chatId as sessionKey
       threadId: undefined, // API tasks don't have thread context
       userMessageId: '', // API tasks don't have a user message to reply to
