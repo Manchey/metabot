@@ -1,3 +1,9 @@
+function buildCtxBar(pct: number): string {
+  const filled = Math.min(Math.round(pct / 10), 10);
+  const color = pct > 80 ? '🟥' : pct >= 50 ? '🟧' : '🟩';
+  return color.repeat(filled) + '⬜'.repeat(10 - filled);
+}
+
 import * as fs from 'node:fs';
 import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
@@ -49,6 +55,7 @@ interface RunningTask {
   processor: StreamProcessor;
   rateLimiter: RateLimiter;
   chatId: string;
+  userId?: string;
   /** Session key for thread-aware session management (format: chatId:threadKey) */
   sessionKey: string;
   /** Thread ID for topic-based conversation continuity */
@@ -82,6 +89,8 @@ export interface ApiTaskOptions {
   groupMembers?: string[];
   /** Group ID — used for inter-bot communication chatId pattern. */
   groupId?: string;
+  /** Message ID to reply to (for thread reply in scheduled tasks). If provided and sender supports replyCard, the initial card is sent as a thread reply. */
+  replyToMessageId?: string;
 }
 
 export interface ApiTaskResult {
@@ -148,6 +157,7 @@ export class MessageBridge {
       config, logger, sender, this.sessionManager, memoryClient, this.audit,
       (sessionKey) => this.runningTasks.get(sessionKey),
       (sessionKey) => this.stopTask(sessionKey),
+      () => this.getRunningTasksInfo(),
     );
 
     this.outputHandler = new OutputHandler(logger, sender, this.outputsManager);
@@ -223,6 +233,11 @@ export class MessageBridge {
     this.commandHandler.setDocSync(docSync);
   }
 
+  /** Inject the activity store for /ps command. */
+  setActivityStore(store: import('../api/activity-store.js').ActivityStore): void {
+    this.commandHandler.setActivityStore(store);
+  }
+
   /** Inject the session registry for cross-platform session sync. */
   setSessionRegistry(registry: SessionRegistry): void {
     this.sessionRegistry = registry;
@@ -252,9 +267,10 @@ export class MessageBridge {
   }
 
   /** Return info about all currently running tasks (for team status display). */
-  getRunningTasksInfo(): Array<{ chatId: string; startTime: number }> {
+  getRunningTasksInfo(): Array<{ chatId: string; userId?: string; startTime: number }> {
     return Array.from(this.runningTasks.entries()).map(([_sessionKey, task]) => ({
       chatId: task.chatId,
+      userId: task.userId,
       startTime: task.startTime,
     }));
   }
@@ -823,6 +839,7 @@ const { userId, chatId, text, imageKey, fileKey, fileName, messageId: msgId, thr
       processor,
       rateLimiter,
       chatId,
+      userId,
       sessionKey,
       threadId: threadKey,
       userMessageId: msgId,
@@ -1198,7 +1215,12 @@ if (newSid) this.sessionManager.setSessionId(sessionKey, newSid, engineName);
 
     let messageId: string | undefined;
     if (sendCards) {
-      messageId = await this.sender.sendCard(chatId, initialState);
+      // If replyToMessageId is provided and sender supports replyCard, send as thread reply
+      if (options.replyToMessageId && this.sender.replyCard) {
+        messageId = await this.sender.replyCard(options.replyToMessageId, initialState, true);
+      } else {
+        messageId = await this.sender.sendCard(chatId, initialState);
+      }
     }
 
     // Generate a messageId for onUpdate even if sendCards is false
@@ -1231,6 +1253,7 @@ if (newSid) this.sessionManager.setSessionId(sessionKey, newSid, engineName);
       processor,
       rateLimiter,
       chatId,
+      userId,
       sessionKey: chatId, // API tasks don't have thread context, use chatId as sessionKey
       threadId: undefined, // API tasks don't have thread context
       userMessageId: '', // API tasks don't have a user message to reply to
@@ -1629,7 +1652,8 @@ if (newSid) this.sessionManager.setSessionId(sessionKey, newSid, engineName);
         ? `${(state.totalTokens / 1000).toFixed(1)}k`
         : `${state.totalTokens}`;
       const ctxK = `${Math.round(state.contextWindow / 1000)}k`;
-      usageStr = ` · ${tokensK}/${ctxK} (${pct}%)`;
+      const bar = buildCtxBar(pct);
+      usageStr = ` · ${tokensK}/${ctxK} (${pct}%) ${bar}`;
     } else if (state.totalTokens) {
       const tokensK = state.totalTokens >= 1000
         ? `${(state.totalTokens / 1000).toFixed(1)}k`

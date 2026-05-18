@@ -40,6 +40,9 @@ function createMockRegistry(botExists = true, isBusy = false): BotRegistry {
   };
   const mockSender = {
     sendTextNotice: vi.fn().mockResolvedValue(undefined),
+    addReaction: vi.fn().mockResolvedValue('reaction-id'),
+    removeReaction: vi.fn().mockResolvedValue(true),
+    replyCard: vi.fn().mockResolvedValue('card-msg-id'),
   };
   const mockBot = {
     bridge: mockBridge,
@@ -350,6 +353,112 @@ describe('TaskScheduler - Recurring Tasks', () => {
     expect(scheduler.listTasks()[0].id).toBe(oneTime.id);
     expect(scheduler.listRecurringTasks()).toHaveLength(1);
     expect(scheduler.listRecurringTasks()[0].id).toBe(recurring.id);
+
+    scheduler.destroy();
+  });
+
+  it('stores originMessageId on one-time and recurring tasks', () => {
+    const scheduler = new TaskScheduler(createMockRegistry(), createMockLogger());
+
+    const oneTime = scheduler.scheduleTask({
+      botName: 'b', chatId: 'c', prompt: 'one-time', delaySeconds: 60, originMessageId: 'msg-123',
+    });
+    const recurring = scheduler.scheduleRecurring({
+      botName: 'b', chatId: 'c', prompt: 'recurring', cronExpr: '0 8 * * *', originMessageId: 'msg-456',
+    });
+
+    expect(oneTime.originMessageId).toBe('msg-123');
+    expect(recurring.originMessageId).toBe('msg-456');
+
+    scheduler.destroy();
+  });
+
+  it('persists originMessageId across restarts', () => {
+    const logger = createMockLogger();
+    const registry = createMockRegistry();
+
+    const scheduler1 = new TaskScheduler(registry, logger);
+    const recurring = scheduler1.scheduleRecurring({
+      botName: 'b', chatId: 'c', prompt: 'p', cronExpr: '0 8 * * *', originMessageId: 'msg-789',
+    });
+    scheduler1.destroy();
+
+    const scheduler2 = new TaskScheduler(registry, logger);
+    const restored = scheduler2.listRecurringTasks();
+    expect(restored).toHaveLength(1);
+    expect(restored[0].originMessageId).toBe('msg-789');
+
+    scheduler2.destroy();
+  });
+
+  it('passes originMessageId to child tasks from recurring and adds reactions on fire', async () => {
+    const registry = createMockRegistry();
+    const scheduler = new TaskScheduler(registry, createMockLogger());
+
+    // Mock: first call returns "now + 100ms", subsequent calls return "now + 60s"
+    let callCount = 0;
+    mockNextCron.mockImplementation(() => {
+      callCount++;
+      return callCount === 1
+        ? Date.now() + 100
+        : Date.now() + 60_000;
+    });
+
+    const recurring = scheduler.scheduleRecurring({
+      botName: 'testbot', chatId: 'chat1', prompt: 'Do work', cronExpr: '* * * * *', originMessageId: 'msg-origin',
+    });
+
+    // Advance past the first fire time
+    await vi.advanceTimersByTimeAsync(200);
+
+    const bot = (registry.get as ReturnType<typeof vi.fn>).mock.results[0]?.value;
+    if (bot) {
+      // The child task should have originMessageId from the recurring task
+      expect(bot.bridge.executeApiTask).toHaveBeenCalledWith(
+        expect.objectContaining({
+          replyToMessageId: 'msg-origin',
+        }),
+      );
+      // Reaction feedback: HOURGLASS added before execution
+      expect(bot.sender.addReaction).toHaveBeenCalledWith('msg-origin', 'HOURGLASS');
+      // Reaction feedback: HOURGLASS removed and DONE added after execution
+      expect(bot.sender.removeReaction).toHaveBeenCalledWith('msg-origin', 'reaction-id');
+      expect(bot.sender.addReaction).toHaveBeenCalledWith('msg-origin', 'DONE');
+    }
+
+    scheduler.destroy();
+  });
+
+  it('no reactions when originMessageId is absent', async () => {
+    const registry = createMockRegistry();
+    const scheduler = new TaskScheduler(registry, createMockLogger());
+
+    let callCount = 0;
+    mockNextCron.mockImplementation(() => {
+      callCount++;
+      return callCount === 1
+        ? Date.now() + 100
+        : Date.now() + 60_000;
+    });
+
+    const recurring = scheduler.scheduleRecurring({
+      botName: 'testbot', chatId: 'chat1', prompt: 'Do work', cronExpr: '* * * * *',
+      // no originMessageId
+    });
+
+    await vi.advanceTimersByTimeAsync(200);
+
+    const bot = (registry.get as ReturnType<typeof vi.fn>).mock.results[0]?.value;
+    if (bot) {
+      expect(bot.sender.addReaction).not.toHaveBeenCalled();
+      expect(bot.sender.removeReaction).not.toHaveBeenCalled();
+      // No replyToMessageId in executeApiTask call
+      expect(bot.bridge.executeApiTask).toHaveBeenCalledWith(
+        expect.objectContaining({
+          replyToMessageId: undefined,
+        }),
+      );
+    }
 
     scheduler.destroy();
   });

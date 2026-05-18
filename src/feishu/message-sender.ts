@@ -3,6 +3,8 @@ import type * as lark from '@larksuiteoapi/node-sdk';
 import type { Logger } from '../utils/logger.js';
 
 export class MessageSender {
+  private userNameCache = new Map<string, string>();
+
   constructor(
     private client: lark.Client,
     private logger: Logger,
@@ -355,5 +357,40 @@ export class MessageSender {
       this.logger.error({ err, messageId, reactionId }, 'Failed to remove reaction');
       return false;
     }
+  }
+
+  /** Resolve Feishu open_ids to display names via contact API. Caches results. */
+  async resolveUserNames(openIds: string[]): Promise<Map<string, string>> {
+    const result = new Map<string, string>();
+    const uncached: string[] = [];
+
+    for (const id of openIds) {
+      if (this.userNameCache.has(id)) {
+        result.set(id, this.userNameCache.get(id)!);
+      } else {
+        uncached.push(id);
+      }
+    }
+
+    for (const id of uncached) {
+      try {
+        const resp = await this.client.contact.v3.user.get({
+          path: { user_id: id },
+          params: { user_id_type: 'open_id' },
+        });
+        const name = (resp?.data as any)?.user?.name;
+        if (name) {
+          this.userNameCache.set(id, name);
+          result.set(id, name);
+        } else {
+          result.set(id, id);
+        }
+      } catch (err) {
+        this.logger.warn({ err, openId: id }, 'Failed to resolve user name, using raw ID');
+        result.set(id, id);
+      }
+    }
+
+    return result;
   }
 }

@@ -8,6 +8,12 @@ import type { CardState, CardStatus } from '../types.js';
 import type { Logger } from '../utils/logger.js';
 import { shouldBypassProxy } from '../utils/http.js';
 
+function buildCtxBar(pct: number): string {
+  const filled = Math.min(Math.round(pct / 10), 10);
+  const color = pct > 80 ? '🟥' : pct >= 50 ? '🟧' : '🟩';
+  return color.repeat(filled) + '⬜'.repeat(10 - filled);
+}
+
 const MAX_MESSAGE_LENGTH = 4096;
 
 const STATUS_EMOJI: Record<CardStatus, string> = {
@@ -86,7 +92,8 @@ function renderCardHtml(state: CardState): string {
         ? `${(state.totalTokens / 1000).toFixed(1)}k`
         : `${state.totalTokens}`;
       const ctxK = `${Math.round(state.contextWindow / 1000)}k`;
-      statParts.push(`ctx: ${tokensK}/${ctxK} (${pct}%)`);
+      const bar = buildCtxBar(pct);
+      statParts.push(`ctx: ${tokensK}/${ctxK} (${pct}%) ${bar}`);
     }
     if (state.status === 'complete' || state.status === 'error') {
       if (state.model) {

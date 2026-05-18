@@ -80,4 +80,8 @@ export class FeishuSenderAdapter implements IMessageSender {
   async removeReaction(messageId: string, reactionId: string): Promise<boolean> {
     return this.sender.removeReaction(messageId, reactionId);
   }
+
+  async resolveUserNames(userIds: string[]): Promise<Map<string, string>> {
+    return this.sender.resolveUserNames(userIds);
+  }
 }

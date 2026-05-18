@@ -98,31 +98,53 @@ print(json.dumps({'botName': sys.argv[1], 'chatId': sys.argv[2], 'prompt': sys.a
         ;;
       add|a)
         bot="$1" chat="$2" delay="$3"; shift 3 2>/dev/null || true
-        prompt="$*"
+        _origin=""
+        _prompt_args=()
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --origin|-o) _origin="$2"; shift 2 ;;
+            *)           _prompt_args+=("$1"); shift ;;
+          esac
+        done
+        prompt="${_prompt_args[*]}"
         if [[ -z "${bot:-}" || -z "${chat:-}" || -z "${delay:-}" || -z "${prompt:-}" ]]; then
-          echo "Usage: mb schedule add <botName> <chatId> <delaySeconds> <prompt>"
+          echo "Usage: mb schedule add <botName> <chatId> <delaySeconds> <prompt> [--origin <messageId>]"
           exit 1
         fi
         python3 -c "
 import json, sys
-print(json.dumps({'botName': sys.argv[1], 'chatId': sys.argv[2], 'delaySeconds': int(sys.argv[3]), 'prompt': sys.argv[4]}))
-" "$bot" "$chat" "$delay" "$prompt" | \
+d = {'botName': sys.argv[1], 'chatId': sys.argv[2], 'delaySeconds': int(sys.argv[3]), 'prompt': sys.argv[4]}
+if sys.argv[5]:
+  d['originMessageId'] = sys.argv[5]
+print(json.dumps(d))
+" "$bot" "$chat" "$delay" "$prompt" "${_origin:-}" | \
         curl -s -X POST "$METABOT_URL/api/schedule" \
           -H "$METABOT_AUTH" -H "Content-Type: application/json" \
           -d @- | _json
         ;;
       cron|c)
         bot="$1" chat="$2" cron_expr="$3"; shift 3 2>/dev/null || true
-        prompt="$*"
+        _origin=""
+        _prompt_args=()
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --origin|-o) _origin="$2"; shift 2 ;;
+            *)           _prompt_args+=("$1"); shift ;;
+          esac
+        done
+        prompt="${_prompt_args[*]}"
         if [[ -z "${bot:-}" || -z "${chat:-}" || -z "${cron_expr:-}" || -z "${prompt:-}" ]]; then
-          echo "Usage: mb schedule cron <botName> <chatId> '<cronExpr>' <prompt>"
+          echo "Usage: mb schedule cron <botName> <chatId> '<cronExpr>' <prompt> [--origin <messageId>]"
           echo "  Example: mb schedule cron mybot oc_xxx '0 8 * * 1-5' Generate daily report"
           exit 1
         fi
         python3 -c "
 import json, sys
-print(json.dumps({'botName': sys.argv[1], 'chatId': sys.argv[2], 'cronExpr': sys.argv[3], 'prompt': sys.argv[4]}))
-" "$bot" "$chat" "$cron_expr" "$prompt" | \
+d = {'botName': sys.argv[1], 'chatId': sys.argv[2], 'cronExpr': sys.argv[3], 'prompt': sys.argv[4]}
+if sys.argv[5]:
+  d['originMessageId'] = sys.argv[5]
+print(json.dumps(d))
+" "$bot" "$chat" "$cron_expr" "$prompt" "${_origin:-}" | \
         curl -s -X POST "$METABOT_URL/api/schedule" \
           -H "$METABOT_AUTH" -H "Content-Type: application/json" \
           -d @- | _json
@@ -142,8 +164,8 @@ print(json.dumps({'botName': sys.argv[1], 'chatId': sys.argv[2], 'cronExpr': sys
       *)
         echo "mb schedule - Task scheduling"
         echo "  mb schedule list                                    - List all scheduled tasks"
-        echo "  mb schedule add <bot> <chatId> <delaySec> <prompt>  - Schedule a one-time task"
-        echo "  mb schedule cron <bot> <chatId> '<cron>' <prompt>   - Schedule a recurring task"
+        echo "  mb schedule add <bot> <chatId> <delaySec> <prompt> [--origin <msgId>]  - Schedule a one-time task"
+        echo "  mb schedule cron <bot> <chatId> '<cron>' <prompt> [--origin <msgId>] - Schedule a recurring task"
         echo "  mb schedule pause <id>                              - Pause a recurring task"
         echo "  mb schedule resume <id>                             - Resume a paused task"
         echo "  mb schedule cancel <id>                             - Cancel a task"
@@ -567,8 +589,8 @@ print(json.dumps(body))
     echo ""
     echo "  Scheduling:"
     echo "    mb schedule list                 - List all scheduled tasks"
-    echo "    mb schedule add <bot> <chatId> <delaySec> <prompt>"
-    echo "    mb schedule cron <bot> <chatId> '<cron>' <prompt>"
+    echo "    mb schedule add <bot> <chatId> <delaySec> <prompt> [--origin <msgId>]"
+    echo "    mb schedule cron <bot> <chatId> '<cron>' <prompt> [--origin <msgId>]"
     echo "    mb schedule pause <id>           - Pause a recurring task"
     echo "    mb schedule resume <id>          - Resume a paused task"
     echo "    mb schedule cancel <id>          - Cancel a scheduled task"

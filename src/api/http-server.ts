@@ -161,6 +161,7 @@ export function startApiServer(options: ApiServerOptions): http.Server {
 
   // Wire activity events: each bridge records to ActivityStore and broadcasts to WS clients
   for (const bot of registry.listRegistered()) {
+    bot.bridge.setActivityStore(activityStore);
     bot.bridge.onActivityEvent = (event) => {
       const recorded = activityStore.record(event);
       ws.handle?.broadcastAll({ type: 'activity_event', event: recorded });

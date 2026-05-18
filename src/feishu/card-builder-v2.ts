@@ -16,6 +16,12 @@
  *   - tag: 'code' / 'code_block': 400 error
  *   - tag: 'note': deprecated in v2
  */
+function buildCtxBar(pct: number): string {
+  const filled = Math.min(Math.round(pct / 10), 10);
+  const color = pct > 80 ? '🟥' : pct >= 50 ? '🟧' : '🟩';
+  return color.repeat(filled) + '⬜'.repeat(10 - filled);
+}
+
 import type { CardState, CardStatus } from '../types.js';
 import { parseMarkdownToBlocks, type Block } from './markdown-parser.js';
 
@@ -230,10 +236,8 @@ export function buildCardV2(state: CardState): string {
         ? `${(state.totalTokens / 1000).toFixed(1)}k`
         : `${state.totalTokens}`;
       const ctxK = `${Math.round(state.contextWindow / 1000)}k`;
-      const filled = Math.min(Math.round(pct / 10), 10);
-      const bar = '🟩'.repeat(filled) + '⬜'.repeat(10 - filled);
-      const warnIcon = pct >= 80 ? '🔴 ' : '';
-      footerParts.push(`${warnIcon}ctx ${tokensK}/${ctxK} (${pct}%) ${bar}`);
+      const bar = buildCtxBar(pct);
+      footerParts.push(`ctx ${tokensK}/${ctxK} (${pct}%) ${bar}`);
     }
 
     // Cost, model, duration — subtle grey (only on complete/error)
