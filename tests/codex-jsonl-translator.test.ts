@@ -56,7 +56,9 @@ describe('Codex JSONL translator', () => {
     expect(cardState.responseText).toBe('DONE');
     expect(cardState.toolCalls).toEqual([{ name: 'Bash', detail: '`/bin/zsh -lc pwd`', status: 'done' }]);
     expect(cardState.model).toBe('gpt-5.4-codex');
-    expect(cardState.totalTokens).toBe(23181);
+    // Context window is an INPUT limit, so totalTokens = inputTokens only (23111),
+    // not inputTokens + outputTokens (23181).
+    expect(cardState.totalTokens).toBe(23111);
     expect(cardState.contextWindow).toBe(400000);
   });
 

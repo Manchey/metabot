@@ -61,6 +61,108 @@ describe('StreamProcessor', () => {
     expect(state.responseText).toBe('');
   });
 
+  it('ignores subagent message_delta token tracking', () => {
+    const p = new StreamProcessor('hi');
+    // Top-level message_delta sets input tokens (cumulative usage per Anthropic docs)
+    p.processMessage(msg({
+      type: 'stream_event',
+      parent_tool_use_id: null,
+      event: { type: 'message_delta', usage: { input_tokens: 100, output_tokens: 50 } },
+    }));
+    // Subagent message_delta should NOT overwrite input tokens
+    p.processMessage(msg({
+      type: 'stream_event',
+      parent_tool_use_id: 'tool-456',
+      event: { type: 'message_delta', usage: { input_tokens: 5000, output_tokens: 3000 } },
+    }));
+    // Result message triggers token calculation using stream event data
+    const state = p.processMessage(msg({
+      type: 'result',
+      subtype: 'success',
+      result: 'done',
+      total_cost_usd: 0.1,
+      duration_ms: 1000,
+      modelUsage: {
+        'claude-sonnet-4-6': {
+          inputTokens: 200,
+          outputTokens: 80,
+          costUSD: 0.08,
+          contextWindow: 200000,
+        },
+      },
+    }));
+    // Should use top-level stream tokens (100), NOT subagent's 5000.
+    // Context window is an INPUT limit, so output_tokens are not added.
+    expect(state.totalTokens).toBe(100);
+  });
+
+  it('falls back to primary model inputTokens only (not subagent cumulative)', () => {
+    const p = new StreamProcessor('hi');
+    // No stream token events, so fallback to modelUsage in result message
+    const state = p.processMessage(msg({
+      type: 'result',
+      subtype: 'success',
+      result: 'done',
+      total_cost_usd: 0.1,
+      duration_ms: 1000,
+      modelUsage: {
+        'claude-sonnet-4-6': {
+          inputTokens: 200,
+          outputTokens: 80,
+          costUSD: 0.08,
+          contextWindow: 200000,
+        },
+        'claude-haiku-4-5': {
+          inputTokens: 5000,
+          outputTokens: 3000,
+          costUSD: 0.02,
+          contextWindow: 200000,
+        },
+      },
+    }));
+    // Should use only primary model (sonnet) inputTokens: 200.
+    // NOT input+output (280), NOT cumulative across all models (8280).
+    // Context window is an INPUT limit, outputTokens don't count.
+    expect(state.totalTokens).toBe(200);
+    expect(state.model).toBe('claude-sonnet-4-6');
+    expect(state.contextWindow).toBe(200000);
+  });
+
+  it('sums input_tokens + cache tokens from message_delta for total context', () => {
+    const p = new StreamProcessor('hi');
+    // Anthropic API: message_delta usage is CUMULATIVE.
+    // input_tokens = non-cached portion only; cache fields are separate.
+    // Total context occupation = all three summed.
+    p.processMessage(msg({
+      type: 'stream_event',
+      parent_tool_use_id: null,
+      event: { type: 'message_delta', usage: {
+        input_tokens: 25000,
+        cache_read_input_tokens: 15000,
+        cache_creation_input_tokens: 8000,
+        output_tokens: 900,
+      } },
+    }));
+    const state = p.processMessage(msg({
+      type: 'result',
+      subtype: 'success',
+      result: 'done',
+      total_cost_usd: 0.1,
+      duration_ms: 1000,
+      modelUsage: {
+        'claude-sonnet-4-6': {
+          inputTokens: 48000,
+          outputTokens: 900,
+          costUSD: 0.08,
+          contextWindow: 200000,
+        },
+      },
+    }));
+    // Should be 25000 + 15000 + 8000 = 48000 (input context occupation),
+    // NOT 48000 + 900 = 48900 (output_tokens don't count against context window)
+    expect(state.totalTokens).toBe(48000);
+  });
+
   it('processes result message as complete', () => {
     const p = new StreamProcessor('hi');
     const state = p.processMessage(msg({
