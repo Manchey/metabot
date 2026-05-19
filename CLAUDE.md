@@ -29,6 +29,8 @@ MetaBot is deployed via **systemd**. After building (`npm run build`), restart w
 sudo systemctl restart metabot
 ```
 
+The sudoers rule `/etc/sudoers.d/metabot` grants `jiaqili` NOPASSWD access to this exact command only (`/usr/bin/systemctl restart metabot`). No password prompt — just run it directly. No other sudo commands are allowed through this rule.
+
 Check status/logs:
 
 ```bash

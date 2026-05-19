@@ -38,7 +38,6 @@ export class StreamProcessor {
   private _contextWindow: number | undefined;
   // Track per-API-call usage from stream events for accurate context window display
   private _lastInputTokens: number | undefined;
-  private _lastOutputTokens: number | undefined;
   // Live background tasks (Monitor, etc.) — task_id → latest rollup.
   private _backgroundEvents: Map<string, BackgroundEvent> = new Map();
 
@@ -198,25 +197,30 @@ export class StreamProcessor {
     const event = message.event;
     if (!event) return;
 
-    // Track message_start/message_delta from ALL levels (not just top-level)
-    // because these carry per-API-call token usage needed for context display
-    if (event.type === 'message_start') {
-      const usage = (event as any).message?.usage;
-      if (usage) {
-        this._lastInputTokens = (usage.input_tokens ?? 0)
-          + (usage.cache_read_input_tokens ?? 0)
-          + (usage.cache_creation_input_tokens ?? 0);
-      }
-    } else if (event.type === 'message_delta') {
-      const usage = (event as any).usage;
-      if (usage?.output_tokens != null) {
-        this._lastOutputTokens = usage.output_tokens;
-      }
-    }
-
-    // Only process top-level stream events for content
+    // Only process top-level stream events for token tracking and content.
+    // Subagent calls (e.g. haiku Task tool) have different context windows,
+    // so tracking their tokens would overwrite the primary model's context
+    // occupation data and distort the progress bar.
     if (message.parent_tool_use_id !== null && message.parent_tool_use_id !== undefined) {
       return;
+    }
+
+    // message_delta carries CUMULATIVE usage (per Anthropic docs) with full
+    // breakdown: input_tokens (non-cached), cache_read_input_tokens, and
+    // cache_creation_input_tokens. Use it for accurate context window occupation.
+    // message_start is only an initial estimate and may lack cache fields.
+    if (event.type === 'message_delta') {
+      const usage = (event as any).usage;
+      if (usage) {
+        // Anthropic format: input_tokens = non-cached portion only.
+        // Total context occupation = non-cached + cache_read + cache_creation.
+        const inputTokens = (usage.input_tokens ?? 0)
+          + (usage.cache_read_input_tokens ?? 0)
+          + (usage.cache_creation_input_tokens ?? 0);
+        if (inputTokens > 0) {
+          this._lastInputTokens = inputTokens;
+        }
+      }
     }
 
     if (event.type === 'content_block_start') {
@@ -253,17 +257,17 @@ export class StreamProcessor {
         const mu = message.modelUsage[primaryModel];
         this._model = primaryModel;
         this._contextWindow = mu.contextWindow;
-        // Use last API call's tokens from stream events (accurate context window occupation)
-        // Falls back to cumulative modelUsage input+output if stream events weren't captured
+        // Use last top-level API call's input tokens from message_delta (cumulative,
+        // accurate context window occupation). Context window is an INPUT limit,
+        // so we don't add output_tokens — they're limited by maxOutputTokens separately.
+        // Falls back to primary model's inputTokens from result message if stream events weren't captured.
         if (this._lastInputTokens != null) {
-          this._totalTokens = this._lastInputTokens + (this._lastOutputTokens ?? 0);
+          this._totalTokens = this._lastInputTokens;
         } else {
-          let totalTokens = 0;
-          for (const m of models) {
-            totalTokens += (message.modelUsage![m].inputTokens ?? 0);
-            totalTokens += (message.modelUsage![m].outputTokens ?? 0);
-          }
-          this._totalTokens = totalTokens;
+          // Use only the primary model's inputTokens — context window occupation
+          // is the input size, not input+output; and comparing subagent tokens
+          // against the primary model's contextWindow would inflate the percentage.
+          this._totalTokens = mu.inputTokens ?? 0;
         }
       }
     }
