@@ -222,6 +222,31 @@ describe('StreamProcessor', () => {
     expect(state.pendingQuestion!.questions[0].question).toBe('Which option?');
   });
 
+  it('gives each question a distinct answer key when headers repeat', () => {
+    const p = new StreamProcessor('hi');
+    const question = (header: string, text: string) => ({
+      question: text,
+      header,
+      options: [{ label: 'A', description: 'a' }],
+      multiSelect: false,
+    });
+    const state = p.processMessage(msg({
+      type: 'assistant',
+      parent_tool_use_id: null,
+      message: {
+        content: [{
+          type: 'tool_use',
+          id: 'tool-q2',
+          name: 'AskUserQuestion',
+          input: { questions: [question('Choice', 'first?'), question('Choice', 'second?'), question('Other', 'third?')] },
+        }],
+      },
+    }));
+    // Answers are keyed by these downstream, so a repeated header must not let
+    // one answer overwrite another.
+    expect(state.pendingQuestion!.questions.map((q) => q.key)).toEqual(['Choice #1', 'Choice #2', 'Other']);
+  });
+
   it('tracks Write tool image paths', () => {
     const p = new StreamProcessor('hi');
     p.processMessage(msg({

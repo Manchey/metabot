@@ -24,6 +24,10 @@ import { CostTracker } from '../utils/cost-tracker.js';
 import { metrics } from '../utils/metrics.js';
 import type { SessionRegistry } from '../session/session-registry.js';
 
+/** Key for staged multi-select picks of one question within one tool call. */
+const picksKey = (toolUseId: string, questionIndex: number): string =>
+  `${toolUseId}#${questionIndex}`;
+
 const TASK_TIMEOUT_MS = 24 * 60 * 60 * 1000; // 24 hours
 const QUESTION_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes for user to answer
 const MAX_QUEUE_SIZE = 5; // max queued messages per thread
@@ -48,8 +52,15 @@ interface RunningTask {
   pendingQuestion: PendingQuestion | null;
   /** Index of the question currently being displayed within pendingQuestion.questions */
   currentQuestionIndex: number;
-  /** Accumulated answers keyed by question header (for multi-question calls) */
+  /** Accumulated answers keyed by question answer-key (see PendingQuestion.key) */
   collectedAnswers: Record<string, string>;
+  /**
+   * Multi-select answers staged by tapping card buttons, keyed by
+   * `<toolUseId>#<questionIndex>`. Keying by the question rather than holding a
+   * single "current selection" avoids any need to reset it when the user moves
+   * on to the next question, answers in text, or a new AskUserQuestion arrives.
+   */
+  multiSelectPicks: Map<string, number[]>;
   cardMessageId: string;
   questionTimeoutId?: ReturnType<typeof setTimeout>;
   processor: StreamProcessor;
@@ -343,8 +354,9 @@ export class MessageBridge {
       this.logger.debug({ chatId, userId }, 'Card action but no pending question — ignoring');
       return;
     }
-    if (value.action !== 'answer_question') {
-      this.logger.debug({ chatId, action: value.action }, 'Unknown card action — ignoring');
+    const { action } = value;
+    if (action !== 'answer_question' && action !== 'toggle_option' && action !== 'submit_question') {
+      this.logger.debug({ chatId, action }, 'Unknown card action — ignoring');
       return;
     }
     if (value.toolUseId !== task.pendingQuestion.toolUseId) {
@@ -354,10 +366,51 @@ export class MessageBridge {
       );
       return;
     }
-    const optionIndex =
-      typeof value.optionIndex === 'number' ? value.optionIndex : -1;
     const currentQ = task.pendingQuestion.questions[task.currentQuestionIndex];
-    if (!currentQ || optionIndex < 0 || optionIndex >= currentQ.options.length) {
+    if (!currentQ) {
+      this.logger.warn({ chatId }, 'Card action has no matching question — ignoring');
+      return;
+    }
+    const optionIndex = typeof value.optionIndex === 'number' ? value.optionIndex : -1;
+    const validOption = optionIndex >= 0 && optionIndex < currentQ.options.length;
+
+    if (action === 'toggle_option' || action === 'submit_question') {
+      if (!currentQ.multiSelect) {
+        this.logger.warn({ chatId, action }, 'Multi-select action on a single-select question — ignoring');
+        return;
+      }
+      const key = picksKey(task.pendingQuestion.toolUseId, task.currentQuestionIndex);
+      const picks = task.multiSelectPicks.get(key) ?? [];
+
+      if (action === 'toggle_option') {
+        if (!validOption) {
+          this.logger.warn({ chatId, optionIndex }, 'Card action has invalid optionIndex — ignoring');
+          return;
+        }
+        task.multiSelectPicks.set(
+          key,
+          picks.includes(optionIndex) ? picks.filter((i) => i !== optionIndex) : [...picks, optionIndex],
+        );
+        await this.redrawQuestionCard(task);
+        return;
+      }
+
+      if (picks.length === 0) {
+        // Submit renders disabled until something is picked, so this only
+        // happens for a card drawn by an older build. Ignore rather than
+        // resolving the question with an empty answer.
+        this.logger.debug({ chatId }, 'submit_question with nothing picked — ignoring');
+        return;
+      }
+      // Reuse the text path: handleAnswer maps "1,3" back to those labels.
+      await this.handleAnswer(
+        { messageId, chatId, chatType: 'card_action', userId, text: picks.join(',') },
+        task,
+      );
+      return;
+    }
+
+    if (!validOption) {
       this.logger.warn({ chatId, optionIndex }, 'Card action has invalid optionIndex — ignoring');
       return;
     }
@@ -369,6 +422,27 @@ export class MessageBridge {
       text: String(optionIndex + 1),
     };
     await this.handleAnswer(syntheticMsg, task);
+  }
+
+  /**
+   * Re-draw the on-screen question card after a multi-select toggle, so the
+   * tapped options show ✓ and the submit button reflects the pick count.
+   */
+  private async redrawQuestionCard(task: RunningTask): Promise<void> {
+    const pending = task.pendingQuestion;
+    const q = pending?.questions[task.currentQuestionIndex];
+    if (!pending || !q) return;
+    const picks = task.multiSelectPicks.get(picksKey(pending.toolUseId, task.currentQuestionIndex)) ?? [];
+    const displayQuestion: PendingQuestion = {
+      toolUseId: pending.toolUseId,
+      questions: [q],
+      selected: picks.map((i) => q.options[i]?.label).filter((l): l is string => Boolean(l)),
+    };
+    await this.pushQuestionCard(task.chatId, task.cardMessageId, {
+      ...task.processor.getCurrentState(),
+      status: 'waiting_for_input',
+      pendingQuestion: displayQuestion,
+    }, displayQuestion);
   }
 
   async handleMessage(msg: IncomingMessage): Promise<void> {
@@ -537,8 +611,10 @@ export class MessageBridge {
       }
     }
 
-    // Store answer for this question
-    task.collectedAnswers[currentQuestion.header] = answerText;
+    // Store answer for this question. Keyed by the per-question answer key
+    // (header, disambiguated by StreamProcessor when headers repeat).
+    task.collectedAnswers[currentQuestion.key ?? currentQuestion.header] = answerText;
+    task.multiSelectPicks.delete(picksKey(pending.toolUseId, task.currentQuestionIndex));
 
     this.logger.info(
       { chatId, answer: answerText, questionIndex: task.currentQuestionIndex, total: pending.questions.length, toolUseId: pending.toolUseId },
@@ -648,8 +724,9 @@ export class MessageBridge {
     // Fill remaining unanswered questions with timeout message
     for (let i = task.currentQuestionIndex; i < pending.questions.length; i++) {
       const q = pending.questions[i];
-      if (!task.collectedAnswers[q.header]) {
-        task.collectedAnswers[q.header] = '用户未及时回复，请自行判断继续';
+      const key = q.key ?? q.header;
+      if (!task.collectedAnswers[key]) {
+        task.collectedAnswers[key] = '用户未及时回复，请自行判断继续';
       }
     }
 
@@ -882,6 +959,7 @@ const { userId, chatId, text, imageKey, fileKey, fileName, messageId: msgId, thr
       pendingQuestion: null,
       currentQuestionIndex: 0,
       collectedAnswers: {},
+      multiSelectPicks: new Map(),
       cardMessageId: messageId,
       processor,
       rateLimiter,
@@ -1296,6 +1374,7 @@ if (newSid) this.sessionManager.setSessionId(sessionKey, newSid, engineName);
       pendingQuestion: null,
       currentQuestionIndex: 0,
       collectedAnswers: {},
+      multiSelectPicks: new Map(),
       cardMessageId: messageId || '',
       processor,
       rateLimiter,

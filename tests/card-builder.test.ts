@@ -255,9 +255,41 @@ describe('buildCardV2', () => {
   it('hints at number combinations for multi-select questions', () => {
     const findHint = (state: CardState) => {
       const parsed = JSON.parse(buildCardV2(state));
-      return parsed.body.elements.find((e: any) => String(e.content).includes('点击按钮选择')).content;
+      const marks = parsed.body.elements.filter((e: any) => e.tag === 'markdown');
+      return marks[marks.length - 1].content;
     };
     expect(findHint(questionState(true))).toContain('1,3');
     expect(findHint(questionState(false))).not.toContain('1,3');
+  });
+
+  it('renders multi-select as toggle buttons plus a gated submit button', () => {
+    const buttonsOf = (state: CardState) =>
+      JSON.parse(buildCardV2(state)).body.elements.filter((e: any) => e.tag === 'button');
+
+    // Nothing picked yet: options toggle, submit exists but is disabled so a
+    // stray click can never resolve the question with an empty answer.
+    const fresh = buttonsOf(questionState(true));
+    expect(fresh).toHaveLength(3); // 2 options + submit
+    expect(fresh[0].behaviors[0].value.action).toBe('toggle_option');
+    expect(fresh[1].behaviors[0].value.action).toBe('toggle_option');
+    expect(fresh[0].text.content).not.toMatch(/^✓/);
+    const submit = fresh[2];
+    expect(submit.behaviors[0].value.action).toBe('submit_question');
+    expect(submit.behaviors[0].value.optionIndex).toBeUndefined();
+    expect(submit.disabled).toBe(true);
+
+    // With picks: ✓ marks, picked options highlighted, submit enabled + counted.
+    const state = questionState(true);
+    state.pendingQuestion!.selected = ['Staging'];
+    const picked = buttonsOf(state);
+    expect(picked[0].text.content).toBe('1. Production');
+    expect(picked[1].text.content).toBe('✓ 2. Staging');
+    expect(picked[1].type).toBe('primary');
+    expect(picked[2].disabled).toBe(false);
+    expect(picked[2].text.content).toContain('1');
+
+    // Single-select keeps one-click answers and no submit button.
+    expect(buttonsOf(questionState(false))).toHaveLength(2);
+    expect(buttonsOf(questionState(false))[0].behaviors[0].value.action).toBe('answer_question');
   });
 });

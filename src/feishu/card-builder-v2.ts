@@ -188,42 +188,61 @@ export function buildCardV2(state: CardState): string {
   // Pending question section — interactive buttons + text-fallback hint
   if (state.pendingQuestion) {
     elements.push({ tag: 'hr' });
+    const picked = state.pendingQuestion.selected ?? [];
     state.pendingQuestion.questions.forEach((q, qi) => {
       const descLines = q.options.map(
         (opt, i) => `**${i + 1}.** ${opt.label} — _${opt.description}_`,
       );
       elements.push({
         tag:     'markdown',
-        content: [`**[${q.header}] ${q.question}**`, '', ...descLines].join('\n'),
+        content: [
+          `**[${q.header}] ${q.question}**${q.multiSelect ? ' （可多选，选好后点「提交选择」）' : ''}`,
+          '',
+          ...descLines,
+        ].join('\n'),
       });
       // Schema 2.0 has no `action` container (it makes the whole card invalid —
       // see the header note), so each option becomes a top-level `button`
       // element. Callbacks must travel through `behaviors`; the v1 top-level
       // `value` field is silently dropped under schema 2.0.
+      //
+      // Multi-select can't be expressed by a single click, so option buttons
+      // only toggle their own state (`toggle_option`) and a separate
+      // `submit_question` button commits the set. Submit is disabled while
+      // nothing is picked, so a click can never resolve the question by accident.
+      const cb = (action: string, optionIndex: number | undefined) => ({
+        type: 'callback',
+        value: {
+          action,
+          toolUseId:     state.pendingQuestion!.toolUseId,
+          questionIndex: qi,
+          ...(optionIndex === undefined ? {} : { optionIndex }),
+        },
+      });
       q.options.forEach((opt, oi) => {
+        const on = q.multiSelect && picked.includes(opt.label);
         elements.push({
           tag:  'button',
-          text: { tag: 'plain_text', content: `${oi + 1}. ${truncate(opt.label, 24)}` },
-          type: oi === 0 ? 'primary' : 'default',
-          behaviors: [
-            {
-              type:  'callback',
-              value: {
-                action:        'answer_question',
-                toolUseId:     state.pendingQuestion!.toolUseId,
-                questionIndex: qi,
-                optionIndex:   oi,
-              },
-            },
-          ],
+          text: { tag: 'plain_text', content: `${on ? '✓ ' : ''}${oi + 1}. ${truncate(opt.label, 24)}` },
+          type: (!q.multiSelect && oi === 0) || on ? 'primary' : 'default',
+          behaviors: [cb(q.multiSelect ? 'toggle_option' : 'answer_question', oi)],
         });
       });
+      if (q.multiSelect) {
+        elements.push({
+          tag:      'button',
+          text:     { tag: 'plain_text', content: `✅ 提交选择${picked.length ? `（${picked.length}）` : ''}` },
+          type:     'primary',
+          disabled: picked.length === 0,
+          behaviors: [cb('submit_question', undefined)],
+        });
+      }
     });
     const multi = state.pendingQuestion.questions.some((q) => q.multiSelect);
     elements.push({
       tag:     'markdown',
       content: multi
-        ? '_点击按钮选择，或直接输入自定义答案。多选题请输入编号组合（如 `1,3`）或选项文字。_'
+        ? '_多选题：点击多个选项后按「提交选择」；也可直接输入编号组合（如 `1,3`）或自定义答案。单选题点击按钮即作答。_'
         : '_点击按钮选择，或直接输入自定义答案_',
     });
   }

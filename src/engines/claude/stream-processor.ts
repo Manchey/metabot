@@ -339,17 +339,33 @@ export class StreamProcessor {
     const questions = inp.questions;
     if (!Array.isArray(questions)) return;
 
-    const parsed = questions.map((q: any) => ({
-      question: String(q.question || ''),
-      header: String(q.header || ''),
-      options: Array.isArray(q.options)
-        ? q.options.map((o: any) => ({
-            label: String(o.label || ''),
-            description: String(o.description || ''),
-          }))
-        : [],
-      multiSelect: Boolean(q.multiSelect),
-    }));
+    // Answers are keyed by header downstream, so two questions sharing a header
+    // (the model is free to repeat it) would overwrite each other. Give every
+    // question in a duplicated group its own key instead of silently colliding.
+    const headerCounts = new Map<string, number>();
+    for (const q of questions) {
+      const h = String((q as any)?.header || '');
+      headerCounts.set(h, (headerCounts.get(h) ?? 0) + 1);
+    }
+
+    const parsed = questions.map((q: any, i: number) => {
+      const header = String(q.header || '');
+      const key = header
+        ? (headerCounts.get(header) ?? 0) > 1 ? `${header} #${i + 1}` : header
+        : `问题 ${i + 1}`;
+      return {
+        question: String(q.question || ''),
+        header,
+        key,
+        options: Array.isArray(q.options)
+          ? q.options.map((o: any) => ({
+              label: String(o.label || ''),
+              description: String(o.description || ''),
+            }))
+          : [],
+        multiSelect: Boolean(q.multiSelect),
+      };
+    });
 
     // Queue instead of overwrite — supports multiple AskUserQuestion calls
     this._pendingQuestions.push({ toolUseId, questions: parsed });

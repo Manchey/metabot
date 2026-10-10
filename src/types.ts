@@ -13,9 +13,22 @@ export interface PendingQuestion {
   questions: Array<{
     question: string;
     header: string;
+    /**
+     * Key used in the answers map sent back to the SDK. Defaults to `header`,
+     * but StreamProcessor disambiguates it ("Header #2") when two questions in
+     * the same call share a header — otherwise one answer would overwrite the
+     * other in the bridge's collectedAnswers record.
+     */
+    key?: string;
     options: Array<{ label: string; description: string }>;
     multiSelect: boolean;
   }>;
+  /**
+   * Labels already toggled on for a multi-select question. Display-only: the
+   * bridge sets it so the card can mark those buttons ✓ and enable the submit
+   * button; StreamProcessor never populates it.
+   */
+  selected?: string[];
 }
 
 export type BackgroundTaskStatus = 'running' | 'completed' | 'failed' | 'stopped';
