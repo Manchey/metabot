@@ -469,6 +469,40 @@ export class MessageBridge {
     await this.executeQuery(msg);
   }
 
+  /**
+   * Patch the streaming card to show a pending question plus its option
+   * buttons. Feishu rejects an *entire* card whose JSON is invalid for the
+   * schema (e.g. 200861 "unsupported tag action"), which silently left users
+   * staring at a frozen "Running..." card with no question at all. So when the
+   * patch fails, fall back to a plain-text message carrying the same question —
+   * answers arrive through handleAnswer either way, so the flow stays usable.
+   */
+  private async pushQuestionCard(
+    chatId: string,
+    cardMessageId: string,
+    state: CardState,
+    question: PendingQuestion,
+  ): Promise<boolean> {
+    const ok = await this.sender.updateCard(cardMessageId, state);
+    if (ok) return true;
+
+    this.logger.error(
+      { chatId, cardMessageId, toolUseId: question.toolUseId },
+      'Question card update failed — falling back to plain-text question',
+    );
+    const minutes = Math.round(QUESTION_TIMEOUT_MS / 60000);
+    for (const q of question.questions) {
+      const opts = q.options
+        .map((o, i) => `${i + 1}. ${o.label}${o.description ? ` — ${o.description}` : ''}`)
+        .join('\n');
+      await this.sender.sendText(
+        chatId,
+        `❓ [${q.header}] ${q.question}\n${opts}\n\n回复编号或直接输入自定义答案（${minutes} 分钟内未回复将自动跳过）`,
+      );
+    }
+    return false;
+  }
+
   private async handleAnswer(msg: IncomingMessage, task: RunningTask): Promise<void> {
     const { chatId, text, imageKey } = msg;
     const pending = task.pendingQuestion!;
@@ -484,11 +518,23 @@ export class MessageBridge {
 
     // Parse answer for the current question
     let answerText: string;
-    const num = parseInt(trimmed, 10);
-    if (num >= 1 && num <= currentQuestion.options.length) {
-      answerText = currentQuestion.options[num - 1].label;
+    if (currentQuestion.multiSelect) {
+      // One button click can't express a multi-select answer, so accept a
+      // number combination ("1,3" / "1 3" / "1、3") and map it to labels.
+      const picked = trimmed.split(/[,，、\s]+/).filter(Boolean).map((t) => parseInt(t, 10));
+      const labels = picked
+        .filter((n) => Number.isInteger(n) && n >= 1 && n <= currentQuestion.options.length)
+        .map((n) => currentQuestion.options[n - 1].label);
+      answerText = labels.length > 0 && labels.length === picked.length
+        ? labels.join(', ')
+        : trimmed;
     } else {
-      answerText = trimmed;
+      const num = parseInt(trimmed, 10);
+      if (num >= 1 && num <= currentQuestion.options.length) {
+        answerText = currentQuestion.options[num - 1].label;
+      } else {
+        answerText = trimmed;
+      }
     }
 
     // Store answer for this question
@@ -518,14 +564,14 @@ export class MessageBridge {
         questions: [nextQ],
       };
       const progress = `(${task.currentQuestionIndex + 1}/${pending.questions.length})`;
-      await this.sender.updateCard(task.cardMessageId, {
+      await this.pushQuestionCard(chatId, task.cardMessageId, {
         ...currentState,
         status: 'waiting_for_input',
         responseText: currentState.responseText
           ? currentState.responseText + `\n\n> **Reply ${progress}:** ${answerText}`
           : `> **Reply:** ${answerText}`,
         pendingQuestion: displayQuestion,
-      });
+      }, displayQuestion);
       return;
     }
 
@@ -566,21 +612,22 @@ export class MessageBridge {
         this.autoAnswerRemainingQuestions(task);
       }, QUESTION_TIMEOUT_MS);
 
-      await this.sender.updateCard(task.cardMessageId, {
+      await this.pushQuestionCard(chatId, task.cardMessageId, {
         ...currentState,
         status: 'waiting_for_input',
         responseText: currentState.responseText
           ? currentState.responseText + `\n\n> **Reply:** ${answerText}\n\n_Next question${progress}..._`
           : `> **Reply:** ${answerText}\n\n_Next question${progress}..._`,
         pendingQuestion: displayQuestion,
-      });
+      }, displayQuestion);
       return;
     }
 
-    // No more questions — resume normal execution
-    const answerSummary = Object.values(task.collectedAnswers).length > 0
-      ? Object.values(task.collectedAnswers).join(', ')
-      : answerText;
+    // No more questions — resume normal execution.
+    // Use the answers captured above: task.collectedAnswers was already reset
+    // when the hook was resolved, so reading it here would show only the last one.
+    const allAnswers = Object.values(collectedAnswers);
+    const answerSummary = allAnswers.length > 0 ? allAnswers.join(', ') : answerText;
     const currentState = task.processor.getCurrentState();
     await this.sender.updateCard(task.cardMessageId, {
       ...currentState,
@@ -912,14 +959,14 @@ if (newSessionId && (newSessionId !== session.sessionId || session.sessionIdEngi
           const progress = pending.questions.length > 1
             ? ` (${runningTask.currentQuestionIndex + 1}/${pending.questions.length})`
             : '';
-          await this.sender.updateCard(messageId, {
+          await this.pushQuestionCard(chatId, messageId, {
             ...state,
             pendingQuestion: displayQuestion,
             // Append progress indicator to response if multi-question
             responseText: progress
               ? (state.responseText || '') + (state.responseText ? '\n\n' : '') + `_Question${progress}_`
               : state.responseText,
-          });
+          }, displayQuestion);
 
           // Set/reset timeout for auto-answer
           if (runningTask.questionTimeoutId) {

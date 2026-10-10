@@ -22,7 +22,11 @@ export class FeishuSenderAdapter implements IMessageSender {
   }
 
   async replyCard(messageId: string, state: CardState, replyInThread: boolean): Promise<string | undefined> {
-    return this.sender.replyCard(messageId, buildCard(state), replyInThread);
+    // Must honour USE_V2 like sendCard/updateCard: mixing a v1 reply card with a
+    // v2 streaming card in the same thread renders two different styles (and a
+    // v2 question card would carry the v1 `action` container that schema 2.0
+    // rejects outright).
+    return this.sender.replyCard(messageId, USE_V2 ? buildCardV2(state) : buildCard(state), replyInThread);
   }
 
   async updateCard(messageId: string, state: CardState): Promise<boolean> {

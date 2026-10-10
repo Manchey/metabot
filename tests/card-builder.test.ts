@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { buildCard, buildHelpCard, buildStatusCard, buildTextCard } from '../src/feishu/card-builder.js';
+import { buildCardV2 } from '../src/feishu/card-builder-v2.js';
 import type { CardState } from '../src/types.js';
 
 describe('buildCard', () => {
@@ -185,5 +186,78 @@ describe('buildTextCard', () => {
     expect(json.header.template).toBe('green');
     expect(json.header.title.content).toBe('Title');
     expect(json.elements[0].content).toBe('Some content');
+  });
+});
+
+const questionState = (multiSelect = false): CardState => ({
+  status: 'waiting_for_input',
+  userPrompt: 'deploy',
+  responseText: 'Before deploying...',
+  toolCalls: [],
+  pendingQuestion: {
+    toolUseId: 'q1',
+    questions: [{
+      question: 'Which env?',
+      header: 'Deploy',
+      options: [
+        { label: 'Production', description: 'Live environment' },
+        { label: 'Staging', description: 'Test environment' },
+      ],
+      multiSelect,
+    }],
+  },
+});
+
+describe('buildCardV2', () => {
+  it('never uses the v1 `action` container, which schema 2.0 rejects outright', () => {
+    // Feishu answers 200861 "unsupported tag action" for the WHOLE card, so an
+    // `action` element doesn't just lose the buttons — the card never renders
+    // and the user sees a frozen "Running..." card with no question at all.
+    const json = JSON.parse(buildCardV2(questionState()));
+    const walk = (node: unknown): unknown[] => {
+      if (Array.isArray(node)) return node.flatMap(walk);
+      if (node && typeof node === 'object') {
+        const o = node as Record<string, unknown>;
+        return [o, ...Object.values(o).flatMap(walk)];
+      }
+      return [];
+    };
+    expect(json.schema).toBe('2.0');
+    expect(walk(json.body).some((n) => (n as Record<string, unknown>).tag === 'action')).toBe(false);
+  });
+
+  it('renders option buttons as top-level elements with behaviors callbacks', () => {
+    const json = JSON.parse(buildCardV2(questionState()));
+    const buttons = json.body.elements.filter((e: any) => e.tag === 'button');
+    expect(buttons).toHaveLength(2);
+    expect(buttons[0].text.content).toContain('Production');
+    expect(buttons[0].type).toBe('primary');
+    expect(buttons[1].type).toBe('default');
+    // v1's top-level `value` is silently dropped under schema 2.0.
+    expect(buttons[0].value).toBeUndefined();
+    expect(buttons[0].behaviors).toEqual([
+      { type: 'callback', value: { action: 'answer_question', toolUseId: 'q1', questionIndex: 0, optionIndex: 0 } },
+    ]);
+    expect(buttons[1].behaviors[0].value.optionIndex).toBe(1);
+    // Buttons must come after the question text and before the reply hint.
+    const questionIdx = json.body.elements.findIndex(
+      (e: any) => e.tag === 'markdown' && String(e.content).includes('Which env?'),
+    );
+    const hintIdx = json.body.elements.findIndex(
+      (e: any) => e.tag === 'markdown' && String(e.content).includes('点击按钮选择'),
+    );
+    const buttonIdx = json.body.elements.findIndex((e: any) => e.tag === 'button');
+    expect(questionIdx).toBeGreaterThanOrEqual(0);
+    expect(buttonIdx).toBeGreaterThan(questionIdx);
+    expect(hintIdx).toBeGreaterThan(buttonIdx);
+  });
+
+  it('hints at number combinations for multi-select questions', () => {
+    const findHint = (state: CardState) => {
+      const parsed = JSON.parse(buildCardV2(state));
+      return parsed.body.elements.find((e: any) => String(e.content).includes('点击按钮选择')).content;
+    };
+    expect(findHint(questionState(true))).toContain('1,3');
+    expect(findHint(questionState(false))).not.toContain('1,3');
   });
 });

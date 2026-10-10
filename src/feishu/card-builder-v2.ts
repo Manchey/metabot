@@ -15,6 +15,12 @@
  *   - <font size="N"> in markdown: ignored
  *   - tag: 'code' / 'code_block': 400 error
  *   - tag: 'note': deprecated in v2
+ *   - tag: 'action' (the v1 button container): rejected outright — API error
+ *     200861 "cards of schema V2 no longer support this capability: unsupported
+ *     tag action". The whole card is refused, not just the buttons, so a card
+ *     containing one never renders at all. Interactive components must be
+ *     top-level body elements (or inside column_set), with callbacks in
+ *     `behaviors` instead of the v1 top-level `value`.
  */
 function buildCtxBar(pct: number): string {
   const filled = Math.min(Math.round(pct / 10), 10);
@@ -190,30 +196,35 @@ export function buildCardV2(state: CardState): string {
         tag:     'markdown',
         content: [`**[${q.header}] ${q.question}**`, '', ...descLines].join('\n'),
       });
-      const actions = q.options.map((opt, oi) => ({
-        tag:  'button',
-        text: { tag: 'plain_text', content: `${oi + 1}. ${opt.label}` },
-        type: 'primary',
-        // Card Schema 2.0 requires button callbacks via `behaviors`. The v1
-        // top-level `value` field is silently dropped under schema 2.0, so the
-        // click never reaches the `card.action.trigger` handler.
-        behaviors: [
-          {
-            type:  'callback',
-            value: {
-              action:        'answer_question',
-              toolUseId:     state.pendingQuestion!.toolUseId,
-              questionIndex: qi,
-              optionIndex:   oi,
+      // Schema 2.0 has no `action` container (it makes the whole card invalid —
+      // see the header note), so each option becomes a top-level `button`
+      // element. Callbacks must travel through `behaviors`; the v1 top-level
+      // `value` field is silently dropped under schema 2.0.
+      q.options.forEach((opt, oi) => {
+        elements.push({
+          tag:  'button',
+          text: { tag: 'plain_text', content: `${oi + 1}. ${truncate(opt.label, 24)}` },
+          type: oi === 0 ? 'primary' : 'default',
+          behaviors: [
+            {
+              type:  'callback',
+              value: {
+                action:        'answer_question',
+                toolUseId:     state.pendingQuestion!.toolUseId,
+                questionIndex: qi,
+                optionIndex:   oi,
+              },
             },
-          },
-        ],
-      }));
-      elements.push({ tag: 'action', actions });
+          ],
+        });
+      });
     });
+    const multi = state.pendingQuestion.questions.some((q) => q.multiSelect);
     elements.push({
       tag:     'markdown',
-      content: '_点击按钮选择，或直接输入自定义答案_',
+      content: multi
+        ? '_点击按钮选择，或直接输入自定义答案。多选题请输入编号组合（如 `1,3`）或选项文字。_'
+        : '_点击按钮选择，或直接输入自定义答案_',
     });
   }
 
