@@ -384,6 +384,8 @@ Supported: text, images (Claude multimodal), files (PDF/code/docs), rich text (P
 | `WIKI_SYNC_ENABLED` | true | Enable MetaMemory→Wiki sync |
 | `WIKI_SPACE_NAME` | MetaMemory | Wiki space name |
 | `WIKI_AUTO_SYNC` | true | Auto-sync on changes |
+| `WS_WATCHDOG_ENABLED` | true | Feishu long-connection health monitor: force-reconnects dead sockets, exits for systemd restart if unrecoverable |
+| `WS_WATCHDOG_STALE_MS` | 300000 | Inbound WS frame silence before a connection is declared dead (ms) |
 | `VOLCENGINE_TTS_APPID` | — | Doubao voice (TTS + STT) |
 | `VOLCENGINE_TTS_ACCESS_KEY` | — | Doubao voice key |
 | `METABOT_URL` | `http://localhost:9100` | MetaBot API URL. Default is local HTTP; for remote access prefer HTTPS or a private-network address |

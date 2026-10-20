@@ -381,6 +381,8 @@ MetaBot 支持 4 种方式与你的 Agent 团队交互：
 | `WIKI_SYNC_ENABLED` | true | 启用 MetaMemory→飞书知识库同步 |
 | `WIKI_SPACE_NAME` | MetaMemory | 飞书知识库空间名称 |
 | `WIKI_AUTO_SYNC` | true | MetaMemory 变更时自动同步 |
+| `WS_WATCHDOG_ENABLED` | true | 飞书长连接健康监控：假死自动重连，无法恢复时退出交给 systemd 拉起 |
+| `WS_WATCHDOG_STALE_MS` | 300000 | 入站 WS 帧静默多久判定连接假死（毫秒） |
 | `VOLCENGINE_TTS_APPID` | — | 豆包语音（TTS + STT） |
 | `VOLCENGINE_TTS_ACCESS_KEY` | — | 豆包语音密钥 |
 | `METABOT_URL` | `http://localhost:9100` | MetaBot API 地址 |

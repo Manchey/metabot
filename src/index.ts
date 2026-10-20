@@ -18,6 +18,7 @@ import { startApiServer } from './api/http-server.js';
 import { startMemoryServer } from './memory/memory-server.js';
 import { DocSync } from './sync/doc-sync.js';
 import { MemoryClient } from './memory/memory-client.js';
+import { loadWsWatchdogConfig, startWsWatchdog, getSdkPingIntervalMs, type WsWatchdogHandle } from './feishu/ws-watchdog.js';
 
 import { SessionRegistry } from './session/session-registry.js';
 
@@ -193,6 +194,20 @@ async function main() {
   ];
   logger.info({ bots: allNames }, 'All bots started');
 
+  // Feishu WS watchdog: detect silently-dead long connections and self-heal
+  // (terminate → SDK reconnect), escalating to process exit → systemd restart.
+  let wsWatchdog: WsWatchdogHandle | undefined;
+  const watchdogConfig = loadWsWatchdogConfig();
+  if (feishuHandles.length > 0 && watchdogConfig.enabled) {
+    wsWatchdog = startWsWatchdog({
+      checkIntervalMs: watchdogConfig.checkIntervalMs,
+      staleMs: watchdogConfig.staleMs,
+      restartGraceMs: watchdogConfig.restartGraceMs,
+      logger,
+      getPingIntervalMs: () => getSdkPingIntervalMs(feishuHandles.map((h) => h.wsClient)),
+    });
+  }
+
   // Create task scheduler
   const scheduler = new TaskScheduler(registry, logger);
 
@@ -292,6 +307,7 @@ async function main() {
   // Graceful shutdown
   const shutdown = () => {
     logger.info('Shutting down...');
+    wsWatchdog?.stop();
     scheduler.destroy();
     if (peerManager) {
       peerManager.destroy();

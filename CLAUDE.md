@@ -103,6 +103,7 @@ Slim summary only — see [docs/internal/architecture.md](docs/internal/architec
 - **Multi-bot mode**: `BOTS_CONFIG=./bots.json` runs multiple bots in one process (see `bots.example.json`). When set, the `FEISHU_APP_*` env vars are ignored.
 - **PersistentClaudeExecutor** (opt-in): `METABOT_PERSISTENT_EXECUTOR=true` keeps one long-lived `query()` per `chatId` so subagents / Agent Teams / `/background` / `/goal` survive across turns. Per-bot override via `persistentExecutor` in `bots.json`. Observability at `GET /api/executors`.
 - **MetaMemory**: external FastAPI+SQLite server at `META_MEMORY_URL` (default `http://localhost:8100`). Claude reads/writes via the `metamemory` skill; `/memory list|search|status` query directly.
+- **Feishu WS watchdog** (on by default): detects silently-dead long connections — stale sockets are terminated so the SDK reconnects; total unrecoverability exits the process for a systemd restart. Knobs: `WS_WATCHDOG_*` (see `.env.example`).
 
 ## Branching Strategy
 
