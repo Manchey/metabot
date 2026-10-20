@@ -1,15 +1,39 @@
 node_modules/
 dist/
+*.tsbuildinfo
+packages/server/static/
+packages/web-ui/dist/
 .env
+.env.*
+!.env.example
+secrets/
 bots.json
 logs/
 nohup.out
 *.log
 .DS_Store
 data/
+*.db
+*.db-shm
+*.db-wal
 site/
+coverage/
+.vitest/
+.idea/
+.vscode/
 ios/MetaBot/.build/
 ios/MetaBot/.swiftpm/
 ios/MetaBot/Pods/
 ios/MetaBot/MetaBot.xcworkspace/xcuserdata/
 ios/AuthKey*.p8
+
+# Engine-installed skill bundles (each bot installs from central skill hub on its own)
+.claude/skills/
+.codex/
+
+# Repository instructions are tracked at the root; generated per-engine skill
+# mirrors remain ignored above.
+
+# Parallel local projects living alongside metabot (not part of this repo)
+naruto-finance-agents/
+bots.test-trunks.json

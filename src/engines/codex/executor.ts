@@ -1,8 +1,8 @@
 import { execSync, spawn, type ChildProcess } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import type { BotConfigBase, CodexBotConfig } from '../../config.js';
+import type { BotConfigBase, CodexBotConfig, CodexReasoningEffort } from '../../config.js';
 import type { Logger } from '../../utils/logger.js';
 import { AsyncQueue } from '../../utils/async-queue.js';
 import type {
@@ -11,6 +11,7 @@ import type {
   ExecutorOptions,
   SDKMessage,
 } from '../claude/executor.js';
+import { buildMetaBotApiPromptContext } from '../prompt-context.js';
 import {
   createCodexTranslatorState,
   translateCodexJsonEvent,
@@ -19,23 +20,87 @@ import {
 
 const isWindows = process.platform === 'win32';
 const FALLBACK_CODEX_CONTEXT_WINDOW = 272000;
+const CODEX_AUTH_ENV_VARS = ['OPENAI_API_KEY', 'CODEX_API_KEY', 'CODEX_ACCESS_TOKEN'];
+const CODEX_EXIT_GRACE_MS = 1000;
 
-function resolveCodexPath(): string {
-  if (process.env.CODEX_EXECUTABLE_PATH) return process.env.CODEX_EXECUTABLE_PATH;
+function findWindowsCodexBinary(npmPrefix: string | undefined): string | undefined {
+  if (!npmPrefix) return undefined;
+
+  const target = process.arch === 'arm64'
+    ? { packageName: 'codex-win32-arm64', triple: 'aarch64-pc-windows-msvc' }
+    : { packageName: 'codex-win32-x64', triple: 'x86_64-pc-windows-msvc' };
+  const candidate = path.join(
+    npmPrefix,
+    'node_modules',
+    '@openai',
+    'codex',
+    'node_modules',
+    '@openai',
+    target.packageName,
+    'vendor',
+    target.triple,
+    'bin',
+    'codex.exe',
+  );
+  return existsSync(candidate) ? candidate : undefined;
+}
+
+export function buildCodexSpawnCommand(
+  executable: string,
+  args: string[],
+  platform: NodeJS.Platform = process.platform,
+): { command: string; args: string[] } {
+  if (platform !== 'win32') return { command: executable, args };
+
+  if (path.basename(executable).toLowerCase() === 'codex.cmd') {
+    const codexScript = path.join(
+      path.dirname(executable),
+      'node_modules',
+      '@openai',
+      'codex',
+      'bin',
+      'codex.js',
+    );
+    if (existsSync(codexScript)) {
+      return { command: process.execPath, args: [codexScript, ...args] };
+    }
+    throw new Error(`Unable to resolve Codex npm entrypoint for ${executable}`);
+  }
+
+  if (/\.(?:cmd|bat)$/i.test(executable)) {
+    throw new Error(`Codex executable must be a native executable on Windows: ${executable}`);
+  }
+  return { command: executable, args };
+}
+
+export function resolveCodexPath(explicitPath?: string): string {
+  const override = explicitPath || process.env.CODEX_EXECUTABLE_PATH;
+  if (override && existsSync(override)) return override;
+
   try {
-    const cmd = isWindows ? 'where codex' : 'which codex';
+    if (isWindows) {
+      const npmPrefix = process.env.APPDATA ? path.join(process.env.APPDATA, 'npm') : undefined;
+      const nativeBinary = findWindowsCodexBinary(npmPrefix);
+      if (nativeBinary) return nativeBinary;
+    }
+    const cmd = isWindows ? 'where codex.cmd' : 'which codex';
     return execSync(cmd, { encoding: 'utf-8' }).trim().split(/\r?\n/)[0];
   } catch {
     if (!isWindows) {
-      for (const candidate of ['/usr/local/bin/codex', '/usr/bin/codex', '/opt/homebrew/bin/codex']) {
+      const home = os.homedir();
+      for (const candidate of [
+        path.join(home, '.local', 'bin', 'codex'),
+        '/usr/local/bin/codex',
+        '/usr/bin/codex',
+        '/opt/homebrew/bin/codex',
+        path.join(home, '.npm-global', 'bin', 'codex'),
+      ]) {
         if (existsSync(candidate)) return candidate;
       }
     }
     return 'codex';
   }
 }
-
-const CODEX_EXECUTABLE = resolveCodexPath();
 
 interface CodexModelMetadata {
   model?: string;
@@ -88,6 +153,95 @@ function readModelsCache(): { models?: Array<{ slug?: string; context_window?: n
   }
 }
 
+interface CodexTokenCountSnapshot {
+  usage: {
+    input_tokens?: number;
+    output_tokens?: number;
+    total_tokens?: number;
+  };
+  contextWindow?: number;
+}
+
+function readLastTokenCountFromSession(sessionId: string | undefined): CodexTokenCountSnapshot | undefined {
+  if (!sessionId) return undefined;
+  const codexHome = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
+  const sessionsDir = path.join(codexHome, 'sessions');
+  const sessionPath = findCodexSessionFile(sessionsDir, sessionId);
+  if (!sessionPath) return undefined;
+
+  try {
+    const lines = readFileSync(sessionPath, 'utf-8').trimEnd().split(/\r?\n/);
+    for (let i = lines.length - 1; i >= 0; i--) {
+      if (!lines[i].includes('"token_count"')) continue;
+      const rec = JSON.parse(lines[i]) as {
+        type?: string;
+        payload?: {
+          type?: string;
+          info?: {
+            last_token_usage?: CodexTokenCountSnapshot['usage'];
+            model_context_window?: number;
+          };
+        };
+      };
+      if (rec.type !== 'event_msg' || rec.payload?.type !== 'token_count') continue;
+      const usage = rec.payload.info?.last_token_usage;
+      if (!usage) return undefined;
+      return {
+        usage,
+        contextWindow: rec.payload.info?.model_context_window,
+      };
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
+function findCodexSessionFile(root: string, sessionId: string): string | undefined {
+  try {
+    if (!existsSync(root)) return undefined;
+    const stack = [root];
+    while (stack.length > 0) {
+      const dir = stack.pop()!;
+      for (const entry of readdirSync(dir)) {
+        const fullPath = path.join(dir, entry);
+        let stat;
+        try { stat = statSync(fullPath); } catch { continue; }
+        if (stat.isDirectory()) {
+          stack.push(fullPath);
+        } else if (entry.endsWith('.jsonl') && entry.includes(sessionId)) {
+          return fullPath;
+        }
+      }
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
+function applyTokenCountSnapshot(message: SDKMessage, snapshot: CodexTokenCountSnapshot | undefined): SDKMessage {
+  if (!snapshot?.usage || !message.modelUsage) return message;
+  const model = Object.keys(message.modelUsage)[0];
+  if (!model) return message;
+  const outputTokens = snapshot.usage.output_tokens ?? 0;
+  const inputTokens = typeof snapshot.usage.total_tokens === 'number'
+    ? Math.max(0, snapshot.usage.total_tokens - outputTokens)
+    : snapshot.usage.input_tokens ?? 0;
+  return {
+    ...message,
+    modelUsage: {
+      ...message.modelUsage,
+      [model]: {
+        ...message.modelUsage[model],
+        inputTokens,
+        outputTokens,
+        contextWindow: snapshot.contextWindow ?? message.modelUsage[model].contextWindow,
+      },
+    },
+  };
+}
+
 function readTomlTopLevelValue(text: string, key: string): string | undefined {
   for (const line of text.split(/\r?\n/)) {
     const trimmed = line.trim();
@@ -124,6 +278,39 @@ function parseTomlStringAssignment(line: string, key: string): string | undefine
   return quoted ? quoted[1] : raw;
 }
 
+function tomlString(value: string): string {
+  return JSON.stringify(value);
+}
+
+/**
+ * Build the environment for the Codex CLI child process.
+ *
+ * When `codex.apiKey` is configured, normalize it to OPENAI_API_KEY and remove
+ * other Codex/OpenAI auth env vars first. Codex reports an auth conflict when
+ * multiple supported auth env vars are present, so explicit per-bot config
+ * must win cleanly over inherited .env / host values.
+ */
+export function buildCodexEnv(
+  codexConfig: CodexBotConfig,
+  baseEnv: NodeJS.ProcessEnv = process.env,
+): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(baseEnv)) {
+    if (value !== undefined) env[key] = value;
+  }
+  for (const [key, value] of Object.entries(codexConfig.env ?? {})) {
+    if (value !== undefined) env[key] = value;
+  }
+
+  const explicitApiKey = codexConfig.apiKey?.trim();
+  if (explicitApiKey) {
+    for (const key of CODEX_AUTH_ENV_VARS) delete env[key];
+    env.OPENAI_API_KEY = explicitApiKey;
+  }
+
+  return env;
+}
+
 /**
  * Build the argv array for `codex exec`. Exported for unit testing.
  * Values are passed as discrete argv entries (never through a shell), so
@@ -137,6 +324,7 @@ export function buildCodexArgs(
   prompt: string,
   sessionId: string | undefined,
   model: string | undefined,
+  reasoningEffort?: CodexReasoningEffort,
 ): string[] {
   const args: string[] = [];
 
@@ -144,12 +332,15 @@ export function buildCodexArgs(
     args.push('--dangerously-bypass-approvals-and-sandbox');
   } else {
     args.push('-a', codexConfig.approvalPolicy ?? 'never');
-    args.push('--sandbox', codexConfig.sandbox ?? 'danger-full-access');
+    args.push('--sandbox', codexConfig.sandbox ?? 'workspace-write');
   }
 
   args.push('-C', cwd);
   if (model) args.push('-m', model);
   if (codexConfig.profile) args.push('-p', codexConfig.profile);
+  if (codexConfig.baseUrl) args.push('-c', `openai_base_url=${tomlString(codexConfig.baseUrl)}`);
+  const effectiveEffort = reasoningEffort ?? codexConfig.reasoningEffort;
+  if (effectiveEffort) args.push('-c', `model_reasoning_effort=${tomlString(effectiveEffort)}`);
   for (const extraArg of codexConfig.extraArgs ?? []) args.push(extraArg);
 
   args.push('exec');
@@ -178,18 +369,23 @@ export class CodexExecutor {
       model: modelMetadata.model,
       contextWindow: modelMetadata.contextWindow,
     });
-    const args = buildCodexArgs(codexConfig, cwd, fullPrompt, sessionId, model);
+    const args = buildCodexArgs(codexConfig, cwd, fullPrompt, sessionId, model, options.reasoningEffort);
     const startTime = Date.now();
     let child: ChildProcess | undefined;
     let sawResult = false;
+    let pendingResult: SDKMessage | undefined;
     let stderr = '';
     let stdoutBuffer = '';
+    let terminalResultDelivered = false;
+    let exitTimer: ReturnType<typeof setTimeout> | undefined;
 
-    this.logger.info({ cwd, hasSession: !!sessionId, outputsDir, engine: 'codex' }, 'Starting Codex execution');
+    const executable = resolveCodexPath(codexConfig.executable);
+    this.logger.info({ cwd, hasSession: !!sessionId, outputsDir, executable, engine: 'codex' }, 'Starting Codex execution');
 
     const finishWithError = (message: string): void => {
-      if (sawResult) return;
+      if (terminalResultDelivered) return;
       sawResult = true;
+      terminalResultDelivered = true;
       queue.enqueue({
         type: 'result',
         subtype: abortController.signal.aborted ? 'error_cancelled' : 'error_during_execution',
@@ -199,13 +395,40 @@ export class CodexExecutor {
         is_error: true,
         errors: [message],
       });
+      queue.finish();
+    };
+
+    const deliverPendingResult = (): void => {
+      if (!pendingResult || terminalResultDelivered) return;
+      terminalResultDelivered = true;
+      const snapshot = state.lastUsage
+        ? { usage: state.lastUsage, contextWindow: state.contextWindow }
+        : readLastTokenCountFromSession(state.sessionId ?? sessionId);
+      queue.enqueue(applyTokenCountSnapshot(pendingResult, snapshot));
+      queue.finish();
+
+      exitTimer = setTimeout(() => {
+        if (!child || child.exitCode !== null || child.signalCode !== null) return;
+        this.logger.warn({ pid: child.pid }, 'Codex emitted a terminal result but did not exit; terminating process');
+        child.kill('SIGTERM');
+        const killTimer = setTimeout(() => {
+          if (child && child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+        }, CODEX_EXIT_GRACE_MS);
+        killTimer.unref?.();
+      }, CODEX_EXIT_GRACE_MS);
+      exitTimer.unref?.();
     };
 
     const emitEvent = (event: CodexJsonEvent): void => {
       const messages = translateCodexJsonEvent(event, state);
       for (const message of messages) {
-        if (message.type === 'result') sawResult = true;
-        queue.enqueue(message);
+        if (message.type === 'result') {
+          sawResult = true;
+          pendingResult = message;
+          deliverPendingResult();
+        } else {
+          queue.enqueue(message);
+        }
       }
     };
 
@@ -224,10 +447,12 @@ export class CodexExecutor {
     };
 
     try {
-      child = spawn(codexConfig.executable || CODEX_EXECUTABLE, args, {
+      const spawnCommand = buildCodexSpawnCommand(executable, args);
+      child = spawn(spawnCommand.command, spawnCommand.args, {
         cwd,
-        env: { ...process.env, ...(codexConfig.env ?? {}) },
+        env: buildCodexEnv(codexConfig),
         stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true,
       });
     } catch (err: any) {
       finishWithError(err?.message || String(err));
@@ -247,9 +472,9 @@ export class CodexExecutor {
       });
       child.on('error', (err) => {
         finishWithError(err.message);
-        queue.finish();
       });
       child.on('close', (code, signal) => {
+        if (exitTimer) clearTimeout(exitTimer);
         if (stdoutBuffer.trim()) {
           try {
             emitEvent(JSON.parse(stdoutBuffer) as CodexJsonEvent);
@@ -260,6 +485,8 @@ export class CodexExecutor {
         if (code !== 0 && !sawResult) {
           const suffix = stderr.trim() ? `: ${stderr.trim()}` : '';
           finishWithError(`Codex exited with ${signal ? `signal ${signal}` : `code ${code}`}${suffix}`);
+        } else {
+          deliverPendingResult();
         }
         if (stderr.trim()) {
           this.logger.debug({ stderr: stderr.trim() }, 'Codex stderr');
@@ -277,6 +504,7 @@ export class CodexExecutor {
         this.logger.warn({ engine: 'codex' }, 'resolveQuestion called on Codex executor — not implemented');
       },
       finish: () => {
+        if (exitTimer) clearTimeout(exitTimer);
         if (child && !child.killed) child.kill('SIGTERM');
         queue.finish();
       },
@@ -308,15 +536,15 @@ export class CodexExecutor {
     }
 
     if (apiContext) {
-      sections.push(
-        `## MetaBot API\nYou are running as bot "${apiContext.botName}" in chat "${apiContext.chatId}".\nUse the /metabot skill for full API documentation (agent bus, scheduling, bot management).`,
-      );
+      sections.push(buildMetaBotApiPromptContext(apiContext));
+
+      if (apiContext.teamContext) sections.push(apiContext.teamContext);
 
       if (apiContext.groupMembers && apiContext.groupMembers.length > 0) {
         const others = apiContext.groupMembers.filter((m) => m !== apiContext.botName);
         if (apiContext.groupId) {
           sections.push(
-            `## Group Chat\nYou are in a group chat (group: ${apiContext.groupId}) with these bots: ${others.join(', ')}.\nTo talk to another bot, use: \`mb talk <botName> grouptalk-${apiContext.groupId}-<botName> "message"\``,
+            `## Group Chat\nYou are in a group chat (group: ${apiContext.groupId}) with these bots: ${others.join(', ')}.\nTo talk to another bot, use: \`metabot talk <botName> grouptalk-${apiContext.groupId}-<botName> "message"\``,
           );
         }
       }

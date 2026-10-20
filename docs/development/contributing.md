@@ -10,7 +10,7 @@ git clone https://github.com/xvirobotics/metabot.git
 cd metabot
 
 # 2. Install dependencies
-npm install
+npm ci --include=dev
 
 # 3. Copy environment config
 cp .env.example .env
@@ -23,7 +23,10 @@ npm run build
 npm run dev
 ```
 
-**Prerequisites:** Node.js 20+, Claude Code CLI installed and authenticated.
+**Prerequisites:** Node.js >= 22.19 and Git. Install and authenticate only the
+engine needed for engine-specific work: Codex CLI, Kimi Code 0.27+, or the
+Claude Code compatibility CLI. Documentation and most unit tests do not
+require an authenticated engine.
 
 ## Development Commands
 

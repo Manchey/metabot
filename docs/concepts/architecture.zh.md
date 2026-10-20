@@ -1,72 +1,102 @@
 # 架构
 
-MetaBot 是一个 TypeScript ESM 项目，连接 IM 平台（飞书、Telegram）与 Claude Code Agent SDK。
+MetaBot 是 Node.js >= 22.19 的 TypeScript ESM monorepo。Bridge 把飞书/Lark、
+Telegram、Slack、微信和 Web 客户端接入引擎无关的消息流水线；每个 Bot 或 Chat
+可以运行 Codex、Kimi Code 或 Claude 兼容引擎。
 
 ## 系统概览
 
+```text
+飞书/Lark · Telegram · Slack · 微信 · Web
+                    │
+             事件与 API 适配器
+                    │
+             MessageBridge
+         命令 · 任务 · 会话 · 媒体
+                    │
+                引擎路由
+          ┌─────────┼──────────┐
+          │         │          │
+   Codex CLI    Kimi Code    Claude Code
+   exec JSONL   本地 Server   兼容路径
+   + resume     API 0.27+     CLI / SDK
+          └─────────┼──────────┘
+                    │
+          共享流式/卡片事件模型
+                    │
+          渠道卡片与 Web 更新
+
+个人 Core (:9200)            Bridge (:9100)
+Agents · Memory · Skills     IM · 本地 API · WebSocket
+T5T · Teams · Chat      ↔     会话 · 文件 · Peers
 ```
-┌──────────────────────────────────────────────────────────┐
-│                       MetaBot                            │
-│                                                          │
-│  ┌──────────┐ ┌───────────┐ ┌──────────┐ ┌───────────┐  │
-│  │ MetaSkill│ │MetaMemory │ │IM Bridge │ │  定时任务  │  │
-│  │  Agent   │ │   共享    │ │  飞书 +  │ │   调度器   │  │
-│  │  工厂    │ │   知识库  │ │ Telegram │ │           │  │
-│  └────┬─────┘ └─────┬─────┘ └────┬─────┘ └─────┬─────┘  │
-│       └──────────────┴────────────┴─────────────┘        │
-│                       ↕                                  │
-│            Claude Code Agent SDK                         │
-│         （bypassPermissions，流式输出）                    │
-│                       ↕                                  │
-│             HTTP API (:9100) — Agent 总线                │
-│          任务委派 · Bot 管理 · 定时调度                    │
-└──────────────────────────────────────────────────────────┘
-```
+
+Codex 是默认引擎，当前使用 `codex exec --json` 和 `codex exec resume`；
+公开版尚未使用 Codex app-server 或原生执行中 steering。Kimi Code 0.27+
+使用官方 loopback Server API，提供持久 Session、原子快照、问题交互、
+工具、子 Agent、Goal 和完成状态。本版本暂不开放飞书执行中 steering。Claude 作为现有 Bot 和
+工作区的显式兼容引擎保留。
 
 ## 三大支柱
 
-| 支柱 | 组件 | 作用 |
-|------|------|------|
-| **受监督** | IM Bridge | 实时流式卡片展示每一步工具调用。人类看到 Agent 做的一切。通过飞书/Telegram 平台设置控制访问。 |
-| **自我进化** | MetaMemory | 共享知识库。Agent 写入学到的东西，其他 Agent 检索引用。组织每天都在变聪明，无需重新训练。 |
-| **Agent 组织** | MetaSkill + 调度器 + Agent 总线 | 一个命令生成完整 Agent 团队。Agent 互相委派任务。定时任务自主运行。Agent 可以创建新 Agent。 |
+| 支柱           | 组件                             | 作用                                                             |
+| -------------- | -------------------------------- | ---------------------------------------------------------------- |
+| **受监督**     | IM Bridge + Web UI               | 流式展示工具和状态，让用户监控、停止、回答，并在引擎支持时插话。 |
+| **自我进化**   | MetaMemory + Skills + T5T        | 把可复用知识、工作流和项目检查点保存在单个模型会话之外。         |
+| **Agent 组织** | Agent Teams + Agent Bus + 调度器 | 协调持久队友、任务、运行、跨 Agent 消息和可选周期工作。          |
 
 ## 消息流
 
-**IM（飞书/Telegram）：**
+**IM 渠道：**
 
-```
-IM 客户端 → EventHandler（解析，@mention 过滤）
-         → MessageBridge（命令路由，任务管理）
-         → ClaudeExecutor（Agent SDK 查询）
-         → StreamProcessor（卡片状态跟踪）
-         → IM 卡片更新（流式）
+```text
+渠道事件
+  → EventHandler（解析、媒体、精确 @Bot 路由）
+  → MessageBridge（命令、队列、任务/会话状态）
+  → Engine.createExecutor()（Codex、Kimi 或 Claude 兼容）
+  → 原生输出转换为共享 SDKMessage/CardState 事件
+  → 节流后的流式卡片或渠道回复
 ```
 
-**Web UI：**
+**个人 Web UI：**
 
+```text
+浏览器
+  → Token 鉴权的 Core API (:9200)
+  → Chat / Agents / Memory / Skills / T5T / Teams
+  → 已注册的 Bridge Agent
+  → 选定的引擎和工作区
 ```
-浏览器 → WebSocket (/ws?token=API_SECRET)
-       → ws-server.ts
-       → MessageBridge.executeApiTask(onUpdate, onQuestion)
-       → 流式 CardState 推送到浏览器
-```
+
+个人版 Package 将 Core 和 Bridge 作为独立 PM2 应用运行。Core 使用本地
+Bearer Token 鉴权，Bridge 渠道凭证留在 Bridge 侧。
+
+## 引擎边界
+
+`src/engines/index.ts` 解析配置的引擎，缺省为 Codex。所有适配器都实现共享
+`Engine` / `Executor` contract，并把各自原生协议转换成 Bridge 和卡片渲染器
+消费的事件格式。
+
+| 引擎        | 原生协议                       | 会话行为                                |
+| ----------- | ------------------------------ | --------------------------------------- |
+| Codex       | `codex exec --json` JSONL      | 使用 `codex exec resume` 续接已保存会话 |
+| Kimi Code   | 官方 `/api/v1` 本地 Server API | 持久 Kimi Session 和原子前端快照        |
+| Claude 兼容 | Claude CLI / Agent SDK         | 现有 Claude 会话和持久 Executor 行为    |
 
 ## 核心模块
 
-| 模块 | 说明 |
-|------|------|
-| `src/index.ts` | 入口。创建 IM 客户端，接线事件分发，优雅关闭。 |
-| `src/config.ts` | 从 `bots.json` 或环境变量加载配置。 |
-| `src/feishu/event-handler.ts` | 解析飞书事件，过滤 @mention，处理文本/图片。 |
-| `src/bridge/message-bridge.ts` | 核心调度器。路由命令，管理每个 chat 的任务，执行 Claude 查询并流式更新。 |
-| `src/claude/executor.ts` | 封装 Agent SDK 的 `query()` 为异步生成器。 |
-| `src/claude/stream-processor.ts` | 将 SDK 消息转为卡片状态对象。 |
-| `src/claude/session-manager.ts` | 内存中的会话存储，按 `chatId` 索引。24 小时过期。 |
-| `src/feishu/card-builder.ts` | 构建飞书交互卡片 JSON，带颜色编码的标题。 |
-| `src/feishu/message-sender.ts` | 飞书 API 封装：发送/更新卡片、上传图片。 |
-| `src/bridge/rate-limiter.ts` | 卡片更新节流（默认 1.5 秒）避免 API 频率限制。 |
-| `src/api/peer-manager.ts` | 跨实例 Bot 发现和任务转发。 |
-| `src/api/voice-handler.ts` | 语音 API：豆包/Whisper STT、Agent 执行、豆包/OpenAI/ElevenLabs TTS。 |
-| `src/web/ws-server.ts` | Web UI 的 WebSocket 服务器。Token 认证、心跳、静态文件服务。 |
-| `src/bridge/outputs-manager.ts` | 输出文件生命周期（准备、扫描、清理、类型路由）。 |
+| 模块                                           | 说明                                                   |
+| ---------------------------------------------- | ------------------------------------------------------ |
+| `src/index.ts`                                 | 入口；创建渠道客户端、注册表、存储和关闭处理器。       |
+| `src/config.ts`                                | 加载引擎、渠道、Core、工作区和每 Bot 配置。            |
+| `src/bridge/message-bridge.ts`                 | 命令、队列、任务、会话、媒体和引擎执行的核心调度器。   |
+| `src/engines/index.ts`                         | 引擎选择和共享边界。                                   |
+| `src/engines/codex/executor.ts`                | 启动 Codex exec/resume 并转换 JSONL 事件。             |
+| `src/engines/kimi/daemon-client.ts`            | 启动或连接 Kimi Code 本地 Server API。                 |
+| `src/engines/kimi/executor.ts`                 | 驱动 Kimi Session、快照、插话、问题、Goal 和完成状态。 |
+| `src/engines/claude/`                          | Claude 兼容 Executor、会话和流处理代码。               |
+| `src/feishu/event-handler.ts`                  | 飞书事件解析、媒体缓存、群模式和精确 @ 路由。          |
+| `src/telegram/` / `src/slack/` / `src/wechat/` | Telegram、Slack 和微信渠道适配器。                     |
+| `src/agent-teams/`                             | 持久本地 Team、任务、成员和运行编排。                  |
+| `packages/server/`                             | 个人 Core HTTP 后端和 Token 鉴权。                     |
+| `packages/web-ui/`                             | 个人 Core 浏览器应用。                                 |

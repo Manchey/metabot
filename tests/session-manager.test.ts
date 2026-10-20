@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
@@ -89,5 +89,40 @@ describe('SessionManager', () => {
     expect(session.sessionIdEngine).toBe('codex');
     expect(session.model).toBe('gpt-5.5-codex');
     expect(session.modelEngine).toBe('codex');
+  });
+
+  it('persists Codex reasoning effort metadata', () => {
+    manager = new SessionManager('/tmp/test-dir', createLogger(), 'effort-test');
+    manager.setReasoningEffort('chat1', 'high');
+    manager.destroy();
+
+    manager = new SessionManager('/tmp/test-dir', createLogger(), 'effort-test');
+    const session = manager.getSession('chat1');
+    expect(session.reasoningEffort).toBe('high');
+
+    manager.setReasoningEffort('chat1', undefined);
+    expect(manager.getSession('chat1').reasoningEffort).toBeUndefined();
+  });
+
+  it('repairs persisted sessions whose working directory no longer exists', () => {
+    const defaultDir = mkdtempSync(join(tmpdir(), 'metabot-session-default-'));
+    const storePath = join(storeDir, 'sessions-repair-test.json');
+    writeFileSync(storePath, JSON.stringify({
+      chat1: {
+        sessionId: 'stale-session',
+        sessionIdEngine: 'codex',
+        workingDirectory: join(storeDir, 'missing-workdir'),
+        lastUsed: Date.now(),
+      },
+    }));
+
+    manager = new SessionManager(defaultDir, createLogger(), 'repair-test');
+    const session = manager.getSession('chat1');
+
+    expect(session.workingDirectory).toBe(defaultDir);
+    expect(session.sessionId).toBeUndefined();
+    expect(session.sessionIdEngine).toBeUndefined();
+
+    rmSync(defaultDir, { recursive: true, force: true });
   });
 });

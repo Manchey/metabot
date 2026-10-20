@@ -1,6 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { Logger } from '../utils/logger.js';
+import { resolveWithinRoot } from '../utils/managed-path.js';
 
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg', '.tiff']);
 
@@ -26,7 +27,11 @@ export class OutputsManager {
 
   /** Create a fresh per-chat outputs directory, preserving recent files. */
   prepareDir(chatId: string): string {
-    const dir = path.join(this.baseDir, chatId);
+    const root = path.resolve(this.baseDir);
+    const dir = resolveWithinRoot(root, chatId);
+    if (!dir || dir === root) {
+      throw new Error('Output path is outside the outputs root');
+    }
 
     // Cancel any pending deferred cleanup for this directory
     const pending = this.pendingCleanups.get(dir);
@@ -65,6 +70,14 @@ export class OutputsManager {
   /** Scan the outputs directory and return metadata for each file found. */
   scanOutputs(outputsDir: string): OutputFile[] {
     const results: OutputFile[] = [];
+    const root = path.resolve(this.baseDir);
+    const managedDir = resolveWithinRoot(root, outputsDir);
+    if (!managedDir || managedDir === root) {
+      this.logger.warn({ outputsDir }, 'Refusing to scan outside the outputs root');
+      return results;
+    }
+    outputsDir = managedDir;
+
     try {
       if (!fs.existsSync(outputsDir)) return results;
       const entries = fs.readdirSync(outputsDir, { withFileTypes: true });
@@ -90,6 +103,14 @@ export class OutputsManager {
 
   /** Schedule deferred cleanup of the outputs directory after RETENTION_MS. */
   cleanup(outputsDir: string): void {
+    const root = path.resolve(this.baseDir);
+    const managedDir = resolveWithinRoot(root, outputsDir);
+    if (!managedDir || managedDir === root) {
+      this.logger.warn({ outputsDir }, 'Refusing to clean up outside the outputs root');
+      return;
+    }
+    outputsDir = managedDir;
+
     // Cancel any existing timer for this dir
     const existing = this.pendingCleanups.get(outputsDir);
     if (existing) clearTimeout(existing);

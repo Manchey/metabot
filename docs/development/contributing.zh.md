@@ -10,7 +10,7 @@ git clone https://github.com/xvirobotics/metabot.git
 cd metabot
 
 # 2. 安装依赖
-npm install
+npm ci --include=dev
 
 # 3. 复制环境配置
 cp .env.example .env
@@ -23,7 +23,9 @@ npm run build
 npm run dev
 ```
 
-**前置条件：** Node.js 20+，Claude Code CLI 已安装并认证。
+**前置条件：** Node.js >= 22.19 和 Git。只有进行特定引擎开发时才需要安装、
+认证对应的 Codex CLI、Kimi Code 0.27+ 或 Claude Code 兼容 CLI。文档和大部分
+单元测试不需要已认证的引擎。
 
 ## 开发命令
 

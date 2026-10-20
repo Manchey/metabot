@@ -18,8 +18,6 @@ export interface WechatBotHandle {
 export async function startWechatBot(
   config: WechatBotConfig,
   logger: Logger,
-  memoryServerUrl: string,
-  memorySecret?: string,
 ): Promise<WechatBotHandle> {
   const botLogger = logger.child({ bot: config.name });
 
@@ -51,7 +49,7 @@ export async function startWechatBot(
   }
 
   const sender = new WechatSender(client, botLogger);
-  const bridge = new MessageBridge(config, botLogger, sender, memoryServerUrl, memorySecret);
+  const bridge = new MessageBridge(config, botLogger, sender);
 
   // Start long polling
   const abortController = new AbortController();

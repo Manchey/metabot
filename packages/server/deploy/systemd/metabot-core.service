@@ -1,0 +1,26 @@
+[Unit]
+Description=MetaBot Core Server (centralized memory + skill hub)
+After=network.target
+
+[Service]
+Type=simple
+# Set this to the (non-root) user that should run the service.
+# install.sh patches this to the chosen USER_NAME.
+User=metabot
+WorkingDirectory=%h/.metabot-core/data
+EnvironmentFile=-/etc/metabot-core/env
+# ExecStart must point at the installed dist/index.js (i.e. INSTALL_DIR/dist/index.js).
+# install.sh patches this to match the actual install dir + node binary.
+ExecStart=/usr/bin/node /opt/metabot-core/dist/index.js
+Restart=on-failure
+RestartSec=5
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=%h/.metabot-core/data
+
+[Install]
+WantedBy=multi-user.target

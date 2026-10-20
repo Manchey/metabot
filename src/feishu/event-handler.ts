@@ -2,7 +2,12 @@ import * as lark from '@larksuiteoapi/node-sdk';
 import type { BotConfig } from '../config.js';
 import type { Logger } from '../utils/logger.js';
 import { MessageSender } from './message-sender.js';
-import { isNoMentionChat } from '../utils/no-mention-store.js';
+import { feishuConversationId } from './conversation.js';
+import { withReplyContext } from '../bridge/reply-context.js';
+import {
+  type FeishuGroupReplyMode,
+  FeishuGroupReplyModeStore,
+} from './group-reply-mode-store.js';
 
 // Re-export from shared types so existing imports continue to work
 export type { IncomingMessage } from '../types.js';
@@ -19,7 +24,13 @@ export interface CardActionEvent {
   value: Record<string, unknown>;
 }
 
-export type CardActionHandler = (event: CardActionEvent) => void;
+export type CardActionHandler = (event: CardActionEvent) => void | Promise<void>;
+export type GroupReplyModeNoticeHandler = (
+  chatId: string,
+  title: string,
+  content: string,
+  color: string,
+) => Promise<void>;
 
 // Cache for group member counts (to avoid calling Feishu API on every message)
 const MEMBER_COUNT_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
@@ -69,9 +80,114 @@ async function isPrivateLikeGroup(chatId: string, sender: MessageSender): Promis
     memberCountCache.set(chatId, { count, ts: Date.now() });
     return count === 2;
   }
-  // API call failed — likely missing im:chat:readonly permission.
-  // Use /noMention command as a manual override.
   return false;
+}
+
+export function isBotMentioned(mentions: unknown, botOpenId?: string): boolean {
+  if (!botOpenId || !Array.isArray(mentions)) {
+    return false;
+  }
+
+  return mentions.some((mention) => {
+    if (!mention || typeof mention !== 'object') {
+      return false;
+    }
+    const id = (mention as { id?: { open_id?: unknown } }).id;
+    return id?.open_id === botOpenId;
+  });
+}
+
+export interface GroupReplyModeCommand {
+  action: 'status' | 'set' | 'help';
+  mode?: FeishuGroupReplyMode;
+}
+
+export function parseGroupReplyModeCommand(text: string): GroupReplyModeCommand | undefined {
+  const legacy = text.trim().match(/^\/nomention(?:\s+(on|off|status))?$/i);
+  if (legacy) {
+    if (legacy[1]?.toLowerCase() === 'status') return { action: 'status' };
+    return { action: 'set', mode: legacy[1]?.toLowerCase() === 'off' ? 'mention' : 'all' };
+  }
+  const match = text.trim().match(/^\/(?:group-reply|group_mode|群回复)(?:\s+(.+))?$/i);
+  if (!match) return undefined;
+  const arg = match[1]?.trim().toLowerCase();
+  if (!arg || arg === 'status' || arg === '状态') return { action: 'status' };
+  if (['mention', 'at', '@', '仅@', '只@', '必须@'].includes(arg)) {
+    return { action: 'set', mode: 'mention' };
+  }
+  if (['all', '全部', '所有消息', '全量'].includes(arg)) {
+    return { action: 'set', mode: 'all' };
+  }
+  return { action: 'help' };
+}
+
+export function shouldProcessGroupMessage(options: {
+  botMentioned: boolean;
+  storedMode?: FeishuGroupReplyMode;
+  configGroupNoMention?: boolean;
+  privateLikeGroup?: boolean;
+}): boolean {
+  if (options.botMentioned) return true;
+  if (options.storedMode) return options.storedMode === 'all';
+  return options.configGroupNoMention === true || options.privateLikeGroup === true;
+}
+
+function groupReplyModeDescription(mode: FeishuGroupReplyMode): string {
+  return mode === 'all' ? '回复群里的所有消息' : '只有被 @ 时才回复';
+}
+
+export async function handleGroupReplyModeCommand(options: {
+  text: string;
+  botName: string;
+  chatId: string;
+  userId: string;
+  defaultMode: FeishuGroupReplyMode;
+  canChangeMode: boolean;
+  store: FeishuGroupReplyModeStore;
+  sendNotice: GroupReplyModeNoticeHandler;
+}): Promise<boolean> {
+  const command = parseGroupReplyModeCommand(options.text);
+  if (!command) return false;
+  const storedMode = options.store.get(options.botName, options.chatId);
+  const currentMode = storedMode ?? options.defaultMode;
+
+  if (command.action === 'set' && command.mode) {
+    if (!options.canChangeMode) {
+      await options.sendNotice(
+        options.chatId,
+        '无权限切换群回复模式',
+        '只有当前飞书群的群主可以修改回复模式。所有群成员都可以 @ 当前 Bot 并使用 `/group-reply status` 查看状态。',
+        'red',
+      );
+      return true;
+    }
+    options.store.set(options.botName, options.chatId, command.mode, options.userId);
+    await options.sendNotice(
+      options.chatId,
+      '群回复模式已更新',
+      `当前 Agent：\`${options.botName}\`\n当前群模式：**${groupReplyModeDescription(command.mode)}**\n\n命令：@ 当前 Bot 后使用 \`/group-reply mention\` 或 \`/group-reply all\``,
+      'green',
+    );
+    return true;
+  }
+
+  if (command.action === 'status') {
+    await options.sendNotice(
+      options.chatId,
+      '群回复模式',
+      `当前 Agent：\`${options.botName}\`\n当前群模式：**${groupReplyModeDescription(currentMode)}**\n模式来源：${storedMode ? '当前群显式设置' : 'Agent 默认设置'}\n\n命令：@ 当前 Bot 后使用 \`/group-reply mention\` 或 \`/group-reply all\``,
+      'blue',
+    );
+    return true;
+  }
+
+  await options.sendNotice(
+    options.chatId,
+    '群回复模式命令',
+    '请先 @ 当前 Bot。用法：\n- `/group-reply mention` — 只有被 @ 时回复\n- `/group-reply all` — 回复群里的所有消息\n- `/group-reply status` — 查看当前模式',
+    'orange',
+  );
+  return true;
 }
 
 export function createEventDispatcher(
@@ -81,6 +197,8 @@ export function createEventDispatcher(
   botOpenId?: string,
   messageSender?: MessageSender,
   onCardAction?: CardActionHandler,
+  groupReplyModeStore?: FeishuGroupReplyModeStore,
+  onGroupReplyModeNotice?: GroupReplyModeNoticeHandler,
 ): lark.EventDispatcher {
   const dispatcher = new lark.EventDispatcher({});
 
@@ -90,7 +208,7 @@ export function createEventDispatcher(
     (dispatcher as unknown as {
       register: (handlers: Record<string, (data: unknown) => unknown>) => void;
     }).register({
-      'card.action.trigger': (data: unknown) => {
+      'card.action.trigger': async (data: unknown) => {
         try {
           const d = data as {
             operator?: { open_id?: string };
@@ -105,7 +223,7 @@ export function createEventDispatcher(
             logger.warn({ data }, 'Card action missing required fields');
             return { toast: { type: 'error', content: 'Invalid card action' } };
           }
-          onCardAction({
+          await onCardAction({
             chatId,
             userId,
             messageId,
@@ -144,50 +262,86 @@ export function createEventDispatcher(
         const chatId = message.chat_id;
         const chatType = message.chat_type;
         const messageId = message.message_id;
-
-        // Extract thread info for topic-based conversation continuity
-        // thread_id: topic token (omt_xxx) - only present when message is in a thread
-        // root_id: root message ID (om_xxx) - the message that started the thread
-        // For session continuity, we use root_id as the thread key so first message and
-        // subsequent thread replies share the same session (root_id == first msg's messageId)
-        const threadId = message.thread_id;
-        const rootId = message.root_id;
-        const parentMessageId = message.parent_id;
-
-        // Log thread info for debugging
-        logger.debug({ messageId, threadId, rootId, parentMessageId }, 'Message thread info');
-
-        // In group chats, only respond when the bot is @mentioned
-        // Exceptions: /noMention override; 2-member groups (private-like); groupNoMention mode
+        const replyMetadata = {
+          ...(typeof message.parent_id === 'string' && message.parent_id ? { parentMessageId: message.parent_id } : {}),
+          rootMessageId: message.root_id || message.parent_id || message.message_id,
+          ...(typeof message.thread_id === 'string' && message.thread_id ? { threadId: message.thread_id } : {}),
+        };
+        const conversationId = feishuConversationId({
+          messageId, chatId, chatType, userId, text: '', ...replyMetadata,
+        });
+        const mediaConversationId = message.root_id || message.parent_id || message.thread_id ? conversationId : chatId;
         const mentions = message.mentions;
+
+        let commandText = '';
+        let botMentioned = false;
         if (chatType === 'group') {
-          const botMentioned = botOpenId
-            ? mentions?.some((m: any) => m.id?.open_id === botOpenId)
-            : mentions && mentions.length > 0;
-          if (!botMentioned) {
-            // /noMention command override — user explicitly toggled this chat
-            if (isNoMentionChat(config.name, chatId)) {
-              logger.debug({ chatId }, '/noMention override, processing without @mention');
-            } else if (config.groupNoMention) {
-              logger.debug({ chatId }, 'Group no-mention mode enabled, processing without @mention');
-            } else if (messageSender && await isPrivateLikeGroup(chatId, messageSender)) {
-              logger.debug({ chatId }, 'Private-like group (2 members), processing without @mention');
-            } else if (msgType === 'image' || msgType === 'file') {
+          botMentioned = isBotMentioned(mentions, botOpenId);
+        }
+        if (chatType === 'group' && msgType === 'text') {
+          try {
+            const content = JSON.parse(message.content);
+            commandText = String(content.text || '').replace(/@_\w+\s*/g, '').trim();
+          } catch {
+            commandText = '';
+          }
+
+          const groupReplyCommand = parseGroupReplyModeCommand(commandText);
+          if (groupReplyCommand && !botMentioned) {
+            logger.debug({ chatId, botName: config.name }, 'Ignoring group reply mode command not addressed to this Bot');
+            return;
+          }
+          if (groupReplyCommand && groupReplyModeStore && onGroupReplyModeNotice) {
+            const storedMode = groupReplyModeStore.get(config.name, chatId);
+            const inheritedPrivateLike = !storedMode && !config.groupNoMention && messageSender
+              ? await isPrivateLikeGroup(chatId, messageSender)
+              : false;
+            const canChangeMode = groupReplyCommand.action !== 'set'
+              || (await messageSender?.isChatOwner(chatId, userId)) === true;
+            await handleGroupReplyModeCommand({
+              text: commandText,
+              botName: config.name,
+              chatId,
+              userId,
+              defaultMode: config.groupNoMention || inheritedPrivateLike ? 'all' : 'mention',
+              canChangeMode,
+              store: groupReplyModeStore,
+              sendNotice: (noticeChatId, title, content, color) => withReplyContext({
+                messageId, chatId, chatType, userId, text: commandText, ...replyMetadata,
+              }, () => onGroupReplyModeNotice(noticeChatId, title, content, color)),
+            });
+            logger.info({ chatId, userId, botName: config.name }, 'Handled group reply mode command');
+            return;
+          }
+        }
+
+        if (chatType === 'group') {
+          const storedMode = groupReplyModeStore?.get(config.name, chatId);
+          const privateLikeGroup = !storedMode && !config.groupNoMention && messageSender
+            ? await isPrivateLikeGroup(chatId, messageSender)
+            : false;
+          if (!shouldProcessGroupMessage({
+            botMentioned,
+            storedMode,
+            configGroupNoMention: config.groupNoMention,
+            privateLikeGroup,
+          })) {
+            if (msgType === 'image' || msgType === 'file') {
               // Cache media messages for later retrieval when user @mentions bot
               const media = parseMediaMessage(message, msgType, logger);
               if (media) {
-                const key = cacheMediaKey(chatId, userId);
+                const key = cacheMediaKey(mediaConversationId, userId);
                 const items = pendingMediaCache.get(key) || [];
                 items.push({ ...media, messageId, ts: Date.now() });
                 pendingMediaCache.set(key, items);
                 logger.info({ chatId, userId, msgType, ...media }, 'Cached group media for later @mention');
               }
               return;
-            } else {
-              logger.debug('Ignoring group message without @mention');
-              return;
             }
+            logger.debug({ chatId, botName: config.name, storedMode }, 'Ignoring group message under mention-only mode');
+            return;
           }
+          logger.debug({ chatId, botName: config.name, storedMode }, 'Processing group message under reply mode');
         }
 
         let text = '';
@@ -228,17 +382,18 @@ export function createEventDispatcher(
           text = '请分析这个文件';
           logger.info({ userId, chatId, chatType, fileKey, fileName }, 'Received file message');
         } else if (msgType === 'post') {
-          // Rich text (post) message: extract plain text and images from nested structure
+          // Rich text (post) message: extract plain text and images from nested structure,
+          // preserving the original ordering by inlining [图N] placeholders where images appeared.
           try {
             const content = JSON.parse(message.content);
             logger.debug({ postContent: JSON.stringify(content).slice(0, 500) }, 'Raw post content');
-            text = extractTextFromPost(content);
-            const postImages = extractImagesFromPost(content);
-            if (postImages.length > 0) {
-              imageKey = postImages[0];
-              postExtraImages = postImages.slice(1);
+            const interleaved = extractPostInterleaved(content);
+            text = interleaved.text;
+            if (interleaved.imageKeys.length > 0) {
+              imageKey = interleaved.imageKeys[0];
+              postExtraImages = interleaved.imageKeys.slice(1);
             }
-            logger.debug({ extractedText: text.slice(0, 200), imageKey, postImageCount: postImages.length }, 'Extracted post content');
+            logger.debug({ extractedText: text.slice(0, 200), imageKey, postImageCount: interleaved.imageKeys.length }, 'Extracted post content');
           } catch {
             logger.warn({ content: message.content }, 'Failed to parse post message content');
             return;
@@ -256,31 +411,8 @@ export function createEventDispatcher(
 
         // Common text cleanup for text and post messages
         if (msgType === 'text' || msgType === 'post') {
-          // Replace @mention tags with user names (only strip the bot's own @mention)
-        // Feishu text format: @_user_1 @张三 帮我看看
-        // mentions array: [{ key: "@_user_1", id: { open_id: "ou_xxx" }, name: "张三" }, ...]
-        if (mentions && Array.isArray(mentions)) {
-          for (const m of mentions) {
-            const key = m.key as string;
-            const mOpenId = m.id?.open_id as string;
-            const mName = m.name as string;
-            if (!key) continue;
-            if (botOpenId && mOpenId === botOpenId) {
-              // Strip bot's own @mention
-              text = text.replace(new RegExp(key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*', 'g'), '');
-            } else if (mName) {
-              // Replace other users' @mention with their display name
-              text = text.replace(new RegExp(key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*', 'g'), `@${mName} `);
-            } else {
-              // No name available, strip the placeholder
-              text = text.replace(new RegExp(key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*', 'g'), '');
-            }
-          }
-          text = text.trim();
-        } else {
-          // No mention data available, strip all @_xxx placeholders
+          // Strip @mention tags (format: @_user_xxx or similar)
           text = text.replace(/@_\w+\s*/g, '').trim();
-        }
 
           // Strip Feishu auto-generated markdown links: [text](url) → text
           text = text.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
@@ -308,7 +440,7 @@ export function createEventDispatcher(
           logger.info({ chatId, postExtraImageCount: postExtraImages.length }, 'Attached extra images from post');
         }
         if (chatType === 'group') {
-          const cached = getCachedMedia(chatId, userId);
+          const cached = getCachedMedia(mediaConversationId, userId);
           if (cached.length > 0) {
             const cachedMedia = cached.map(m => ({
               messageId: m.messageId,
@@ -317,12 +449,12 @@ export function createEventDispatcher(
               fileName: m.fileName,
             }));
             extraMedia = extraMedia ? [...extraMedia, ...cachedMedia] : cachedMedia;
-            clearCachedMedia(chatId, userId);
+            clearCachedMedia(mediaConversationId, userId);
             logger.info({ chatId, userId, mediaCount: cached.length }, 'Attached cached media to @mention message');
           }
         }
 
-        onMessage({ messageId, chatId, chatType, userId, text, imageKey, fileKey, fileName, extraMedia, threadId, rootId, parentMessageId });
+        onMessage({ messageId, chatId: conversationId, chatType, userId, text, ...replyMetadata, imageKey, fileKey, fileName, extraMedia });
       } catch (err) {
         logger.error({ err }, 'Error handling message event');
       }
@@ -354,58 +486,23 @@ function parseMediaMessage(
 }
 
 /**
- * Extract all image_keys from a Feishu post (rich text) message.
- * Looks for { tag: "img", image_key: "..." } elements in the post content.
+ * Extract text and images from a Feishu post (rich text) message in a single pass,
+ * preserving the original ordering. Images are replaced with [Image N] placeholders
+ * (1-indexed) inside the text, and the matching image_keys are returned in the
+ * same order, so the caller can re-align them downstream.
+ *
+ * Handles two content shapes:
+ *   With locale wrapper:    { "zh_cn": { "title": "...", "content": [[{tag, ...}, ...], ...] } }
+ *   Without locale wrapper: { "title": "...", "content": [[{tag, ...}, ...], ...] }
  */
-function extractImagesFromPost(content: Record<string, unknown>): string[] {
+function extractPostInterleaved(
+  content: Record<string, unknown>,
+): { text: string; imageKeys: string[] } {
   const bodies: Array<Record<string, unknown>> = [];
 
   if (Array.isArray(content.content)) {
     bodies.push(content);
   } else {
-    for (const locale of Object.values(content)) {
-      if (locale && typeof locale === 'object' && !Array.isArray(locale)) {
-        const loc = locale as Record<string, unknown>;
-        if (Array.isArray(loc.content)) {
-          bodies.push(loc);
-        }
-      }
-    }
-  }
-
-  const keys: string[] = [];
-  for (const body of bodies) {
-    const paragraphs = body.content as unknown[][];
-    for (const paragraph of paragraphs) {
-      if (!Array.isArray(paragraph)) continue;
-      for (const element of paragraph) {
-        if (!element || typeof element !== 'object') continue;
-        const el = element as Record<string, unknown>;
-        if (el.tag === 'img' && typeof el.image_key === 'string') {
-          keys.push(el.image_key);
-        }
-      }
-    }
-  }
-
-  return keys;
-}
-
-/**
- * Extract plain text from Feishu post (rich text) message content.
- * Handles two formats:
- *   With locale wrapper: { "zh_cn": { "title": "...", "content": [[{tag, text}, ...], ...] } }
- *   Without locale wrapper: { "title": "...", "content": [[{tag, text}, ...], ...] }
- */
-function extractTextFromPost(content: Record<string, unknown>): string {
-  // Try to find the post body — either the content itself or nested under a locale key
-  const bodies: Array<Record<string, unknown>> = [];
-
-  if (Array.isArray(content.content)) {
-    // Direct format (no locale wrapper)
-    bodies.push(content);
-  } else {
-    // Locale-wrapped format: values are { title, content }
     for (const locale of Object.values(content)) {
       if (locale && typeof locale === 'object' && !Array.isArray(locale)) {
         const loc = locale as Record<string, unknown>;
@@ -418,6 +515,7 @@ function extractTextFromPost(content: Record<string, unknown>): string {
 
   for (const body of bodies) {
     const parts: string[] = [];
+    const imageKeys: string[] = [];
 
     if (body.title && typeof body.title === 'string') {
       parts.push(body.title);
@@ -432,6 +530,9 @@ function extractTextFromPost(content: Record<string, unknown>): string {
         const el = element as Record<string, unknown>;
         if ((el.tag === 'text' || el.tag === 'a') && typeof el.text === 'string') {
           line.push(el.text);
+        } else if (el.tag === 'img' && typeof el.image_key === 'string') {
+          imageKeys.push(el.image_key);
+          line.push(`[Image ${imageKeys.length}]`);
         }
       }
       if (line.length > 0) {
@@ -439,11 +540,10 @@ function extractTextFromPost(content: Record<string, unknown>): string {
       }
     }
 
-    if (parts.length > 0) {
-      return parts.join('\n');
+    if (parts.length > 0 || imageKeys.length > 0) {
+      return { text: parts.join('\n'), imageKeys };
     }
   }
 
-  return '';
+  return { text: '', imageKeys: [] };
 }
-

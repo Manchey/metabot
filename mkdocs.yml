@@ -1,12 +1,14 @@
 site_name: MetaBot
 site_url: https://xvirobotics.com/metabot
-site_description: 构建受监督的、自我进化的 Agent 组织的基础设施
+site_description: MetaBot Personal Edition — a self-hosted Core Console for Codex, Kimi Code and Claude Code, reachable from Web, Feishu/Lark, Telegram, Slack and WeChat.
 repo_url: https://github.com/xvirobotics/metabot
 repo_name: xvirobotics/metabot
 edit_uri: edit/main/docs/
 
 theme:
   name: material
+  custom_dir: docs/overrides
+  font: false
   palette:
     - scheme: slate
       primary: blue
@@ -32,6 +34,9 @@ theme:
   icon:
     repo: fontawesome/brands/github
 
+extra_css:
+  - assets/stylesheets/docs-theme.css
+
 markdown_extensions:
   - admonition
   - pymdownx.details
@@ -50,7 +55,7 @@ markdown_extensions:
 plugins:
   - search
   - i18n:
-      # Files with no language suffix (index.md, about.md, …) are English —
+      # Files with no language suffix (index.md, troubleshooting.md, …) are English —
       # set en as the default locale to match that convention. Chinese
       # translations use the `.zh.md` suffix and override per file.
       languages:
@@ -64,42 +69,28 @@ plugins:
           nav:
             - 首页: index.md
             - 快速开始:
-              - 安装: getting-started/installation.md
-              - 快速配置: getting-started/quick-setup.md
-              - 飞书应用配置: getting-started/feishu-app-setup.md
-            - 核心概念:
-              - 架构: concepts/architecture.md
-              - 会话隔离: concepts/session-isolation.md
-              - 安全: concepts/security.md
-            - 功能:
-              - MetaSkill: features/metaskill.md
-              - MetaMemory: features/metamemory.md
-              - Web UI: features/web-ui.md
-              - Peers 联邦: features/peers.md
-              - 任务调度: features/scheduler.md
-              - Wiki 同步: features/wiki-sync.md
-              - 微信接入: features/wechat.md
-              - 语音助手: features/voice-jarvis.md
-              - 输出文件: features/outputs.md
-            - 配置:
-              - 环境变量: configuration/environment-variables.md
-              - 多 Bot 模式: configuration/multi-bot.md
-            - 使用:
-              - 聊天命令: usage/chat-commands.md
-              - 示例提示词: usage/example-prompts.md
-              - 使用场景: usage/use-cases.md
+                - 安装: getting-started/installation.md
+                - 快速配置: getting-started/quick-setup.md
+                - 飞书应用配置: getting-started/feishu-app-setup.md
+            - 产品:
+                - Core Console: features/web-ui.md
+                - 多 Bot 与引擎: configuration/multi-bot.md
+                - MetaMemory: features/metamemory.md
+                - MetaSkill: features/metaskill.md
+                - Agent 团队: features/agent-teams.md
+                - Slack: features/slack.md
+                - 微信接入: features/wechat.md
             - 参考:
-              - REST API: reference/api.md
-              - mb CLI (Agent Bus): reference/cli-mb.md
-              - mm CLI (MetaMemory): reference/cli-mm.md
-              - metabot CLI: reference/cli-metabot.md
-            - 部署:
-              - 生产部署: deployment/production.md
-            - 开发:
-              - 贡献指南: development/contributing.md
-              - 项目结构: development/project-structure.md
-            - 故障排除: troubleshooting.md
-            - 关于: about.md
+                - 聊天命令: usage/chat-commands.md
+                - metabot CLI: reference/cli-metabot.md
+                - REST API: reference/api.md
+                - 环境变量: configuration/environment-variables.md
+                - 故障排除: troubleshooting.md
+            - 运维与开发:
+                - 架构: concepts/architecture.md
+                - 安全: concepts/security.md
+                - 生产部署: deployment/production.md
+                - 贡献指南: development/contributing.md
 
 extra:
   social:
@@ -116,39 +107,25 @@ extra:
 nav:
   - Home: index.md
   - Getting Started:
-    - Installation: getting-started/installation.md
-    - Quick Setup: getting-started/quick-setup.md
-    - Feishu App Setup: getting-started/feishu-app-setup.md
-  - Concepts:
-    - Architecture: concepts/architecture.md
-    - Session Isolation: concepts/session-isolation.md
-    - Security: concepts/security.md
-  - Features:
-    - MetaSkill: features/metaskill.md
-    - MetaMemory: features/metamemory.md
-    - Web UI: features/web-ui.md
-    - Peers Federation: features/peers.md
-    - Task Scheduler: features/scheduler.md
-    - Wiki Sync: features/wiki-sync.md
-    - WeChat: features/wechat.md
-    - Voice Assistant: features/voice-jarvis.md
-    - Output Files: features/outputs.md
-  - Configuration:
-    - Environment Variables: configuration/environment-variables.md
-    - Multi-Bot Mode: configuration/multi-bot.md
-  - Usage:
-    - Chat Commands: usage/chat-commands.md
-    - Example Prompts: usage/example-prompts.md
-    - Use Cases: usage/use-cases.md
+      - Installation: getting-started/installation.md
+      - Quick Setup: getting-started/quick-setup.md
+      - Feishu App Setup: getting-started/feishu-app-setup.md
+  - Product:
+      - Core Console: features/web-ui.md
+      - Multi-Bot and Engines: configuration/multi-bot.md
+      - MetaMemory: features/metamemory.md
+      - MetaSkill: features/metaskill.md
+      - Agent Teams: features/agent-teams.md
+      - Slack: features/slack.md
+      - WeChat: features/wechat.md
   - Reference:
-    - REST API: reference/api.md
-    - mb CLI (Agent Bus): reference/cli-mb.md
-    - mm CLI (MetaMemory): reference/cli-mm.md
-    - metabot CLI: reference/cli-metabot.md
-  - Deployment:
-    - Production: deployment/production.md
-  - Development:
-    - Contributing: development/contributing.md
-    - Project Structure: development/project-structure.md
-  - Troubleshooting: troubleshooting.md
-  - About: about.md
+      - Chat Commands: usage/chat-commands.md
+      - metabot CLI: reference/cli-metabot.md
+      - REST API: reference/api.md
+      - Environment Variables: configuration/environment-variables.md
+      - Troubleshooting: troubleshooting.md
+  - Operations and Development:
+      - Architecture: concepts/architecture.md
+      - Security: concepts/security.md
+      - Production: deployment/production.md
+      - Contributing: development/contributing.md

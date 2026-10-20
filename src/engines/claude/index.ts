@@ -23,12 +23,13 @@ export class ClaudeEngine implements Engine {
 
 export { ClaudeExecutor } from './executor.js';
 export { StreamProcessor, extractImagePaths } from './stream-processor.js';
-export { SessionManager } from './session-manager.js';
+export { DEFAULT_CODEX_GOAL_MAX_ITERATIONS, SessionManager } from './session-manager.js';
 export type { UserSession } from './session-manager.js';
 export type {
   SDKMessage,
   ExecutionHandle,
   ExecutorOptions,
   ApiContext,
+  TeamEvent,
 } from './executor.js';
 export type { DetectedTool } from './stream-processor.js';

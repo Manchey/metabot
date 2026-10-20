@@ -35,7 +35,7 @@ For peers on remote servers, prefer HTTPS URLs fronted by Caddy or another TLS r
     ```
 
     - `METABOT_PEERS` — comma-separated peer URLs (required)
-    - `METABOT_PEER_SECRETS` — comma-separated secrets, positional match with URLs (optional, needed if the peer has `API_SECRET` set)
+    - `METABOT_PEER_SECRETS` — comma-separated Bridge API secrets, positional match with URLs (required for non-health peer API calls)
     - `METABOT_PEER_NAMES` — comma-separated display names (optional, auto-derived from URL if omitted, e.g. `localhost-9200`)
 
 === "bots.json"
@@ -62,7 +62,10 @@ For peers on remote servers, prefer HTTPS URLs fronted by Caddy or another TLS r
 
     - `name` — display name for the peer (required)
     - `url` — peer's API URL (required)
-    - `secret` — the peer's `API_SECRET` (optional, needed if the peer has authentication enabled)
+    - `secret` — the peer's `API_SECRET` (required for non-health peer API calls)
+
+Expose peer URLs only over loopback, a private network, or your own authenticated
+HTTPS reverse proxy.
 
 !!! tip "You don't need bots.json"
     If you're running a single bot, just add `METABOT_PEERS` to your `.env` — no `bots.json` needed. The `bots.json` peers field is only a convenience for multi-bot setups.
@@ -73,10 +76,10 @@ Use `peerName/botName` syntax for precise routing:
 
 ```bash
 # Auto-routing — searches local first, then peers in order
-mb talk backend-bot chatId "fix the bug"
+metabot talk backend-bot chatId "fix the bug"
 
 # Explicit peer — routes directly to alice's backend-bot
-mb talk alice/backend-bot chatId "fix the bug"
+metabot talk alice/backend-bot chatId "fix the bug"
 ```
 
 ## API
@@ -90,9 +93,9 @@ mb talk alice/backend-bot chatId "fix the bug"
 ## CLI
 
 ```bash
-mb peers                            # list peers and status
-mb bots                             # list all bots (includes peer bots)
-mb talk alice/bot chatId "prompt"    # talk to a specific peer's bot
+metabot peers                            # list peers and status
+metabot bots                             # list all bots (includes peer bots)
+metabot talk alice/bot chatId "prompt"   # talk to a specific peer's bot
 ```
 
 ## Health Monitoring

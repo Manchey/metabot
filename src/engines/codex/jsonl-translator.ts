@@ -6,6 +6,7 @@ export interface CodexTranslatorState {
   startTime: number;
   model?: string;
   contextWindow?: number;
+  lastUsage?: CodexUsage;
 }
 
 export interface CodexJsonEvent {
@@ -13,6 +14,7 @@ export interface CodexJsonEvent {
   thread_id?: string;
   item?: CodexItem;
   usage?: CodexUsage;
+  payload?: CodexPayload;
   error?: { message?: string };
   message?: string;
 }
@@ -21,6 +23,16 @@ export interface CodexUsage {
   input_tokens?: number;
   cached_input_tokens?: number;
   output_tokens?: number;
+  total_tokens?: number;
+}
+
+export interface CodexPayload {
+  type?: string;
+  info?: {
+    last_token_usage?: CodexUsage;
+    total_token_usage?: CodexUsage;
+    model_context_window?: number;
+  };
 }
 
 export type CodexItem =
@@ -70,6 +82,10 @@ export function translateCodexJsonEvent(
 
     case 'turn.failed':
       return [buildResultMessage(undefined, state, true, event.error?.message)];
+
+    case 'event_msg':
+      updateTokenCount(event.payload, state);
+      return [];
 
     case 'error':
       return event.message
@@ -125,18 +141,43 @@ function translateCompletedItem(item: CodexItem, state: CodexTranslatorState): S
   return [];
 }
 
+function updateTokenCount(payload: CodexPayload | undefined, state: CodexTranslatorState): void {
+  if (payload?.type !== 'token_count') return;
+  const info = payload.info;
+  if (!info) return;
+  if (typeof info.model_context_window === 'number' && info.model_context_window > 0) {
+    state.contextWindow = info.model_context_window;
+  }
+  if (info.last_token_usage) {
+    state.lastUsage = info.last_token_usage;
+  }
+}
+
 function buildResultMessage(
   usage: CodexUsage | undefined,
   state: CodexTranslatorState,
   isError: boolean,
   errorMessage?: string,
 ): SDKMessage {
+  const reliableUsage = state.lastUsage ?? usage;
+  const outputTokens = reliableUsage?.output_tokens ?? 0;
+  const totalTokens = reliableUsage?.total_tokens;
+  const inputTokens = typeof totalTokens === 'number'
+    ? Math.max(0, totalTokens - outputTokens)
+    : reliableUsage?.input_tokens ?? 0;
+  const contextWindow = state.contextWindow ?? 0;
+  const reportedTokens = inputTokens + outputTokens;
+  // Codex turn.completed usage can be cumulative across the whole resumed
+  // thread. If we did not see a token_count.last_token_usage event and the
+  // reported total is larger than the model window, it is not a valid ctx
+  // occupancy value. Keep model/duration visible but suppress the bogus ctx.
+  const usageLooksCumulative = !state.lastUsage && contextWindow > 0 && reportedTokens > contextWindow;
   const modelUsage = state.model
     ? {
         [state.model]: {
-          inputTokens: usage?.input_tokens ?? 0,
-          outputTokens: usage?.output_tokens ?? 0,
-          contextWindow: state.contextWindow ?? 0,
+          inputTokens: usageLooksCumulative ? 0 : inputTokens,
+          outputTokens: usageLooksCumulative ? 0 : outputTokens,
+          contextWindow: usageLooksCumulative ? 0 : contextWindow,
           costUSD: 0,
         },
       }

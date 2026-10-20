@@ -5,38 +5,38 @@ import type { CardState } from '../types.js';
  * Implemented by each IM platform (Feishu, Telegram, etc.).
  */
 export interface IMessageSender {
+  /** Actual platform chat ID, distinct from a topic conversation address. */
+  getTransportChatId?(conversationId: string): string;
+
+  /** Seed a new topic with its referenced turn, without importing another session. */
+  getThreadContext?(conversationId: string): Promise<string | undefined>;
+
   /** Send a new streaming card/message for a CardState. Returns messageId for subsequent updates. */
   sendCard(chatId: string, state: CardState): Promise<string | undefined>;
-
-  /** Reply to a message with a card, optionally in a thread. Returns messageId for subsequent updates. */
-  replyCard?(messageId: string, state: CardState, replyInThread: boolean): Promise<string | undefined>;
 
   /** Update an existing streaming card/message with new CardState. Returns false on failure. */
   updateCard(messageId: string, state: CardState): Promise<boolean>;
 
+  /** Send a dedicated question card, optionally with platform-native buttons. */
+  sendQuestionCard?(chatId: string, state: CardState): Promise<string | undefined>;
+
+  /** Update an existing question card with new CardState (e.g., mark answered). */
+  updateQuestionCard?(messageId: string, state: CardState): Promise<boolean>;
+
   /** Send a simple notice message (for command responses: /help, /reset, /stop, etc.). */
   sendTextNotice(chatId: string, title: string, content: string, color?: string): Promise<void>;
-
-  /** Reply to a message with a notice card, optionally in a thread. */
-  replyTextNotice?(messageId: string, title: string, content: string, color?: string, replyInThread?: boolean): Promise<void>;
 
   /** Send a plain text message. */
   sendText(chatId: string, text: string): Promise<void>;
 
-  /** Reply to a message with plain text, optionally in a thread. */
-  replyText?(messageId: string, text: string, replyInThread?: boolean): Promise<void>;
-
   /** Send a local image file to the chat. */
   sendImageFile(chatId: string, filePath: string): Promise<boolean>;
-
-  /** Reply to a message with a local image file, optionally in a thread. */
-  replyImageFile?(messageId: string, filePath: string, replyInThread?: boolean): Promise<boolean>;
 
   /** Send a local file to the chat. */
   sendLocalFile(chatId: string, filePath: string, fileName: string): Promise<boolean>;
 
-  /** Reply to a message with a local file, optionally in a thread. */
-  replyLocalFile?(messageId: string, filePath: string, fileName: string, replyInThread?: boolean): Promise<boolean>;
+  /** Send a local audio file as a native voice/audio message, when supported. */
+  sendAudioFile?(chatId: string, filePath: string, fileName?: string): Promise<boolean>;
 
   /** Download a user-sent image to a local path. */
   downloadImage(messageId: string, imageKey: string, savePath: string): Promise<boolean>;
@@ -44,15 +44,10 @@ export interface IMessageSender {
   /** Download a user-sent file to a local path. */
   downloadFile(messageId: string, fileKey: string, savePath: string): Promise<boolean>;
 
-  /** Add an emoji reaction to a message. Returns reaction_id if successful, undefined otherwise. */
-  addReaction(messageId: string, emojiType: string): Promise<string | undefined>;
-
-  /** Remove an emoji reaction from a message. Returns true if successful. */
-  removeReaction(messageId: string, reactionId: string): Promise<boolean>;
+  addReaction?(messageId: string, emojiType: string): Promise<string | undefined>;
+  removeReaction?(messageId: string, reactionId: string): Promise<boolean>;
+  resolveUserNames?(userIds: string[]): Promise<Map<string, string>>;
 
   /** If true, the bridge will not send a separate "Task completed" text after the card update. */
   skipCompletionNotice?: boolean;
-
-  /** Resolve user IDs to display names. Returns a Map of userId → displayName. Falls back to raw IDs if unavailable. */
-  resolveUserNames?(userIds: string[]): Promise<Map<string, string>>;
 }

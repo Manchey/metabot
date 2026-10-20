@@ -1,0 +1,110 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  pull_request:
+    paths:
+      - '.github/workflows/release.yml'
+      - 'install.sh'
+      - 'ecosystem.core.config.cjs'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'scripts/pack-github-release.sh'
+      - 'packages/server/**'
+      - 'packages/web-ui/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22.19.0
+          cache: npm
+
+      - run: npm ci
+
+      - name: Verify tag matches package version
+        if: github.event_name == 'push'
+        run: test "${GITHUB_REF_NAME#v}" = "$(node -p "require('./package.json').version")"
+
+      - name: Run package contract tests
+        run: npm exec --workspace @xvirobotics/metabot-core-server -- vitest run tests/pack-metabot.test.ts tests/pack-github-release.test.ts tests/bootstrap-update.test.ts
+
+      - name: Build release assets
+        run: npm run pack:github
+
+      - name: Verify release assets
+        run: |
+          bash -n dist/github-release/install.sh scripts/pack-github-release.sh packages/server/scripts/pack-metabot.sh
+          (cd dist/github-release && sha256sum -c SHA256SUMS)
+          tar tzf dist/github-release/metabot-runtime.tgz >/dev/null
+
+      - name: Smoke extracted runtime install and build
+        run: |
+          smoke_dir="$(mktemp -d)"
+          tar xzf dist/github-release/metabot-runtime.tgz -C "$smoke_dir"
+          cd "$smoke_dir"
+          npm install --include=dev
+          npm run build:bridge
+          npm run build -w @xvirobotics/cli
+          npm run build -w @xvirobotics/metabot-core-server
+          npm run build -w @xvirobotics/metabot-core-web-ui
+          test -f dist/index.js
+          test -f packages/cli/dist/index.js
+          test -f packages/server/dist/index.js
+          test -f packages/server/static/index.html
+
+          if grep -R -E '/oauth2/sign_(in|out)|X-Forwarded-Email' packages/server/static; then
+            echo "enterprise login resource leaked into personal Web UI" >&2
+            exit 1
+          fi
+
+          export HOME="$smoke_dir/home"
+          export METABOT_CORE_DATA_DIR="$HOME/.metabot-core/data"
+          export METABOT_CORE_HOST=127.0.0.1
+          export METABOT_CORE_PORT=19200
+          mkdir -p "$METABOT_CORE_DATA_DIR"
+          node packages/server/dist/index.js >"$smoke_dir/core.log" 2>&1 &
+          core_pid=$!
+          trap 'kill "$core_pid" 2>/dev/null || true' EXIT
+
+          for _ in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:19200/health >/dev/null && break
+            sleep 1
+          done
+          release_version="$(node -p "require('./package.json').version")"
+          curl -fsS http://127.0.0.1:19200/health | grep -q "\"version\":\"$release_version\""
+          test -s "$METABOT_CORE_DATA_DIR/admin-bootstrap-token.txt"
+          test "$(stat -c %a "$METABOT_CORE_DATA_DIR/admin-bootstrap-token.txt")" = 600
+          token="$(head -n 1 "$METABOT_CORE_DATA_DIR/admin-bootstrap-token.txt")"
+          curl -fsS -H "Authorization: Bearer $token" http://127.0.0.1:19200/api/agents >/dev/null
+          curl -fsS http://127.0.0.1:19200/ | grep -qi '<html'
+          if grep -F "$token" "$smoke_dir/core.log"; then
+            echo "bootstrap token leaked into Core logs" >&2
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: metabot-github-release
+          path: dist/github-release/*
+
+      - name: Publish GitHub Release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "$GITHUB_REF_NAME"
+          dist/github-release/install.sh
+          dist/github-release/metabot-runtime.tgz
+          dist/github-release/SHA256SUMS
+          --verify-tag --generate-notes --title "$GITHUB_REF_NAME"

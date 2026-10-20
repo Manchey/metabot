@@ -4,6 +4,7 @@ import * as os from 'node:os';
 import type * as http from 'node:http';
 import { jsonResponse, escapeHtml, wrapPreviewHtml } from './helpers.js';
 import type { RouteContext } from './types.js';
+import { resolveWithinRoot } from '../../utils/managed-path.js';
 
 export async function handleFileRoutes(
   ctx: RouteContext,
@@ -39,11 +40,19 @@ export async function handleFileRoutes(
     const originalName = urlObj.searchParams.get('filename') || 'upload';
     const chatId = urlObj.searchParams.get('chatId') || 'web';
 
-    const uploadDir = path.join(os.tmpdir(), 'metabot-uploads', chatId);
-    fs.mkdirSync(uploadDir, { recursive: true });
-
+    const uploadsRoot = path.resolve(path.join(os.tmpdir(), 'metabot-uploads'));
+    const uploadDir = resolveWithinRoot(uploadsRoot, chatId);
+    if (!uploadDir || uploadDir === uploadsRoot) {
+      jsonResponse(res, 400, { error: 'Invalid chatId' });
+      return true;
+    }
     const safeName = originalName.replace(/[^a-zA-Z0-9._\-\u4e00-\u9fff]/g, '_');
-    const filePath = path.join(uploadDir, safeName);
+    const filePath = resolveWithinRoot(uploadDir, safeName);
+    if (!filePath || filePath === uploadDir) {
+      jsonResponse(res, 400, { error: 'Invalid filename' });
+      return true;
+    }
+    fs.mkdirSync(uploadDir, { recursive: true });
     fs.writeFileSync(filePath, buffer);
 
     logger.info({ chatId, filename: safeName, size: buffer.length }, 'File uploaded');
@@ -54,10 +63,10 @@ export async function handleFileRoutes(
   // GET /api/files/preview/<chatId>/<filename> — convert docx/xlsx to HTML
   if (method === 'GET' && url.startsWith('/api/files/preview/')) {
     const filePart = decodeURIComponent(url.slice('/api/files/preview/'.length).split('?')[0]);
-    const fullPath = path.resolve(path.join(os.tmpdir(), 'metabot-uploads', filePart));
     const uploadsRoot = path.resolve(path.join(os.tmpdir(), 'metabot-uploads'));
+    const fullPath = resolveWithinRoot(uploadsRoot, filePart);
 
-    if (!fullPath.startsWith(uploadsRoot)) {
+    if (!fullPath) {
       res.writeHead(403, { 'Content-Type': 'text/plain' });
       res.end('Forbidden');
       return true;
@@ -87,11 +96,11 @@ export async function handleFileRoutes(
         }
         html = wrapPreviewHtml(path.basename(fullPath), tables.join('\n'));
       } else if (ext === '.pptx' || ext === '.ppt') {
-        const { execSync } = await import('child_process');
+        const { execFileSync } = await import('child_process');
         const tmpOut = path.join(os.tmpdir(), 'metabot-preview-' + Date.now());
         fs.mkdirSync(tmpOut, { recursive: true });
         try {
-          execSync(`soffice --headless --convert-to html --outdir "${tmpOut}" "${fullPath}"`, { timeout: 30000 });
+          execFileSync('soffice', ['--headless', '--convert-to', 'html', '--outdir', tmpOut, fullPath], { timeout: 30000 });
           const htmlFile = fs.readdirSync(tmpOut).find((f: string) => f.endsWith('.html'));
           if (htmlFile) {
             html = fs.readFileSync(path.join(tmpOut, htmlFile), 'utf-8');
@@ -125,10 +134,10 @@ export async function handleFileRoutes(
   // GET /api/files/<chatId>/<filename> — serve uploaded files
   if (method === 'GET' && url.startsWith('/api/files/')) {
     const filePart = decodeURIComponent(url.slice('/api/files/'.length).split('?')[0]);
-    const fullPath = path.resolve(path.join(os.tmpdir(), 'metabot-uploads', filePart));
     const uploadsRoot = path.resolve(path.join(os.tmpdir(), 'metabot-uploads'));
+    const fullPath = resolveWithinRoot(uploadsRoot, filePart);
 
-    if (!fullPath.startsWith(uploadsRoot)) {
+    if (!fullPath) {
       res.writeHead(403, { 'Content-Type': 'text/plain' });
       res.end('Forbidden');
       return true;

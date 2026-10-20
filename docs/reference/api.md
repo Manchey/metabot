@@ -4,21 +4,30 @@ MetaBot exposes a REST API on port `9100` (configurable via `API_PORT`).
 
 ## Authentication
 
-If `API_SECRET` is set, all requests require:
+All non-health Bridge API requests require a Bearer credential:
 
 ```
 Authorization: Bearer <API_SECRET>
 ```
 
+`token=` query-string credentials are not accepted. The Bridge binds to
+`127.0.0.1` by default; set `API_HOST` explicitly only behind your own
+private/TLS boundary.
+
+The Bridge WebSocket `/ws` follows the same rule. Non-browser clients should
+use the `Authorization` header; browser clients can use the
+`metabot-bearer.<API_SECRET>` WebSocket subprotocol when needed.
+
 ## Endpoints
 
 ### Health & Info
 
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/api/health` | Health check (includes bot count, peer status) |
-| `GET` | `/api/stats` | Cost & usage stats (per-bot, per-user) |
-| `GET` | `/api/metrics` | Prometheus metrics endpoint |
+| Method | Path | Auth required | Description |
+|--------|------|---------------|-------------|
+| `GET` | `/api/health` | No | Health check — returns `{ status, uptime }` only |
+| `GET` | `/api/status` | Yes | Rich status: bots, peer counts, scheduled/recurring tasks |
+| `GET` | `/api/stats` | Yes | Cost & usage stats (per-bot, per-user) |
+| `GET` | `/api/metrics` | Yes | Prometheus metrics endpoint |
 
 ### Bots
 

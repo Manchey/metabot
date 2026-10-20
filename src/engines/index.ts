@@ -11,7 +11,7 @@ import { CodexEngine } from './codex/index.js';
  * Engine selection:
  *   1. `config.engine` field (explicit)
  *   2. `METABOT_ENGINE` env var (global default)
- *   3. `'claude'` (fallback)
+ *   3. `'codex'` (fallback)
  */
 export function createEngine(
   config: BotConfigBase,
@@ -39,7 +39,7 @@ export function resolveEngineName(config: BotConfigBase): EngineName {
   if (explicit) return explicit;
   const envDefault = process.env.METABOT_ENGINE as EngineName | undefined;
   if (envDefault === 'claude' || envDefault === 'kimi' || envDefault === 'codex') return envDefault;
-  return 'claude';
+  return 'codex';
 }
 
 export type { Engine, EngineName, Executor } from './types.js';
@@ -51,6 +51,7 @@ export { CodexEngine } from './codex/index.js';
 // Moving these behind the engine boundary lets consumers import from a single place.
 export {
   ClaudeExecutor,
+  DEFAULT_CODEX_GOAL_MAX_ITERATIONS,
   StreamProcessor,
   SessionManager,
   extractImagePaths,
@@ -62,4 +63,5 @@ export type {
   ExecutorOptions,
   ApiContext,
   DetectedTool,
+  TeamEvent,
 } from './claude/index.js';

@@ -5,7 +5,14 @@ export default tseslint.config(
   eslint.configs.recommended,
   ...tseslint.configs.recommended,
   {
-    ignores: ['dist/**', 'node_modules/**', '*.js', '*.mjs', 'src/memory/static/**'],
+    ignores: [
+      'dist/**',
+      'node_modules/**',
+      '*.js',
+      '*.mjs',
+      'src/memory/static/**',
+      'packages/**',
+    ],
   },
   {
     files: ['src/**/*.ts', 'tests/**/*.ts'],
@@ -14,6 +21,21 @@ export default tseslint.config(
       '@typescript-eslint/no-unused-vars': ['warn', { argsIgnorePattern: '^_', varsIgnorePattern: '^_' }],
       '@typescript-eslint/no-empty-function': 'off',
       'no-empty': ['error', { allowEmptyCatch: true }],
+      'no-restricted-imports': ['error', {
+        patterns: [
+          {
+            group: [
+              '@xvirobotics/metabot-core-server',
+              '@xvirobotics/metabot-core-server/*',
+              '../packages/server/*',
+              '../../packages/server/*',
+              '../../../packages/server/*',
+              'packages/server/*',
+            ],
+            message: 'Bridge code must not import server internals. Cross the boundary via HTTP /api/*.',
+          },
+        ],
+      }],
     },
   },
 );

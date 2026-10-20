@@ -4,21 +4,29 @@ MetaBot 在端口 `9100`（通过 `API_PORT` 配置）暴露 REST API。
 
 ## 认证
 
-如设置了 `API_SECRET`，所有请求需要：
+除健康检查外，Bridge API 请求都需要 Bearer 凭据：
 
 ```
 Authorization: Bearer <API_SECRET>
 ```
 
+不再接受 `token=` 查询参数传递凭据。Bridge 默认监听 `127.0.0.1`；只有放在
+自有私网/TLS 边界后，才应显式设置 `API_HOST`。
+
+Bridge WebSocket `/ws` 也遵循同一规则。非浏览器客户端应使用 `Authorization`
+Header；浏览器客户端可在需要时使用 `metabot-bearer.<API_SECRET>` WebSocket
+subprotocol。
+
 ## 端点
 
 ### 健康与信息
 
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| `GET` | `/api/health` | 健康检查（含 Bot 数、peer 状态） |
-| `GET` | `/api/stats` | 费用与使用统计（按 Bot/用户） |
-| `GET` | `/api/metrics` | Prometheus 监控指标 |
+| 方法 | 路径 | 需要认证 | 说明 |
+|------|------|----------|------|
+| `GET` | `/api/health` | 否 | 健康检查 — 仅返回 `{ status, uptime }` |
+| `GET` | `/api/status` | 是 | 详细状态：Bot 数、peer 数量、定时/周期任务 |
+| `GET` | `/api/stats` | 是 | 费用与使用统计（按 Bot/用户） |
+| `GET` | `/api/metrics` | 是 | Prometheus 监控指标 |
 
 ### Bot 管理
 
@@ -45,7 +53,7 @@ Authorization: Bearer <API_SECRET>
 }
 ```
 
-`botName` 字段支持[限定名](../features/peers.md#限定名)：`peerName/botName`。
+`botName` 字段支持[限定名](../features/peers.md#qualified-names)：`peerName/botName`。
 
 !!! note "已弃用的别名"
     `POST /api/tasks` 仍可用但已弃用。请使用 `/api/talk`。

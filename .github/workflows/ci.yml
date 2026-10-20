@@ -8,17 +8,15 @@ on:
 
 jobs:
   check:
+    name: check (22)
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        node-version: [20, 22]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - name: Use Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@v4
+      - name: Use Node.js 22.19.0
+        uses: actions/setup-node@v5
         with:
-          node-version: ${{ matrix.node-version }}
+          node-version: 22.19.0
           cache: npm
 
       - name: Install dependencies
@@ -26,6 +24,13 @@ jobs:
 
       - name: Type check
         run: npx tsc --noEmit
+
+      # Workspace test suites (packages/cli, metamemory, skill-hub) import the
+      # compiled entry of these thin libraries (@xvirobotics/cli-core etc.,
+      # exports -> dist/). `tsc --noEmit` above does not emit, so build them
+      # before running tests or the imports fail to resolve.
+      - name: Build workspace libraries
+        run: npm run build -w @xvirobotics/cli-core -w @xvirobotics/metamemory -w @xvirobotics/skill-hub
 
       - name: Run tests
         run: npm test
@@ -37,11 +42,11 @@ jobs:
     runs-on: ubuntu-latest
     needs: check
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
-          node-version: 22
+          node-version: 22.19.0
           cache: npm
 
       - run: npm ci

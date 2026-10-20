@@ -1,93 +1,121 @@
 # Production Deployment
 
-## Quick Start
+The signed GitHub Release installer is the supported Personal Edition
+deployment path. It installs two local services:
+
+| Service | Default port | Purpose |
+|---|---:|---|
+| Core Console | `9200` | Web UI, Chat, Agents, Memory, Skills, T5T, Teams, CLI APIs |
+| Bridge | `9100` | IM channels, engine execution, scheduling, voice, peer routing |
+
+MetaMemory is part of Core. There is no standalone service on port `8100`.
+
+## Install and verify
 
 ```bash
-metabot start                       # start with PM2
-metabot update                      # pull + rebuild + restart
+curl -fsSL https://github.com/xvirobotics/metabot/releases/latest/download/install.sh | bash
+
+metabot status
+metabot doctor
+curl -fsS http://localhost:9200/health
 ```
 
-## PM2 Auto-Start
-
-Enable auto-start on boot:
+The installer verifies `SHA256SUMS`, validates the Personal Edition manifest,
+and starts the owned PM2 applications. Enable boot persistence after both
+services are healthy:
 
 ```bash
-pm2 startup && pm2 save
+pm2 save
+pm2 startup
 ```
 
-This registers MetaBot as a system service that starts automatically after reboot.
+Run the command printed by `pm2 startup`, then run `pm2 save` again.
 
-## Manual PM2 Commands
+## No inbound port is required for chat channels
 
-```bash
-pm2 start ecosystem.config.cjs      # start
-pm2 restart metabot                  # restart
-pm2 stop metabot                     # stop
-pm2 logs metabot                     # view logs
-pm2 status                           # process status
-```
+- Feishu/Lark uses a persistent outbound WebSocket.
+- Telegram uses outbound long polling.
+- Local Web access works on loopback.
 
-## Build for Production
+Only publish Core when remote browser access is intentional. Keep Bridge on
+loopback or a private network unless a separate authenticated API endpoint is
+required.
 
-```bash
-npm run build                        # TypeScript compile to dist/
-npm start                            # run compiled output (dist/index.js)
-```
+## HTTPS reverse proxy
 
-## No Public IP Required
+Mobile microphone access and remote browser use require a secure context. A
+minimal Caddy configuration proxies the single Core Console:
 
-- **Feishu** uses WebSocket (persistent connection) — no incoming port needed
-- **Telegram** uses long polling — no incoming port needed
-
-For remote CLI access or Peers federation, do not expose the raw API ports (`9100` / `8100`) directly on the public internet. Prefer HTTPS behind Caddy, or keep the services on a private network such as Tailscale or WireGuard.
-
-## Remote CLI Access
-
-Generate a strong API secret first:
-
-```bash
-openssl rand -hex 32
-```
-
-Then configure CLI tools to connect through your HTTPS reverse proxy for internet-reachable deployments:
-
-```bash
-# In ~/.metabot/.env
-METABOT_URL=https://metabot.yourdomain.com
-META_MEMORY_URL=https://memory.yourdomain.com
-API_SECRET=your-secret
-```
-
-This allows `mb` and `mm` commands to work from any machine while keeping TLS termination at the proxy. If your servers are reachable only over a private network such as Tailscale or WireGuard, use those private addresses instead.
-
-## HTTPS with Caddy
-
-HTTPS is required for the Web UI's phone call voice mode on mobile browsers (microphone access needs a secure context), and it is also the recommended default for remote CLI access and Peers federation. [Caddy](https://caddyserver.com/) is the recommended reverse proxy — it handles Let's Encrypt certificates automatically.
-
-```bash
-# Install Caddy
-curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list
-sudo apt-get update && sudo apt-get install caddy
-
-# Configure (replace with your domain)
-sudo tee /etc/caddy/Caddyfile > /dev/null << 'EOF'
-metabot.yourdomain.com {
-    reverse_proxy localhost:9100
+```caddy
+metabot.example.com {
+    reverse_proxy 127.0.0.1:9200
 }
-
-memory.yourdomain.com {
-    reverse_proxy localhost:8100
-}
-EOF
-sudo systemctl restart caddy
 ```
 
-**Prerequisites:**
+Then configure remote CLI clients:
 
-- A domain with an A record pointing to your server's public IP
-- Ports 80 and 443 open for Let's Encrypt validation
+```bash
+export METABOT_CORE_URL=https://metabot.example.com
+export METABOT_CORE_TOKEN="<personal-token>"
+metabot memory health
+```
 
-Caddy automatically obtains and renews certificates. WebSocket connections (`/ws`) are proxied transparently — no additional configuration needed. Use the same HTTPS hostnames for `METABOT_URL`, `META_MEMORY_URL`, and remote peer entries in `METABOT_PEERS`.
+Use a private network such as Tailscale or WireGuard when public access is not
+needed. Never publish the raw token in a URL, shell history, or shared config.
 
-For full setup details, see the [Web UI docs](../features/web-ui.md#https-setup).
+## Bridge remote access
+
+Most users do not need this. Commands such as `metabot bots`, `schedule`,
+`teams`, `peers`, and `voice` use the Bridge API. If remote Bridge access is
+required:
+
+1. set a strong `API_SECRET`;
+2. proxy `127.0.0.1:9100` through a separate authenticated HTTPS hostname or a
+   private network;
+3. set `METABOT_URL` on the client.
+
+Do not reuse the Core token as the Bridge secret.
+
+## Restart safety
+
+Use `metabot restart` instead of calling `pm2 restart metabot` directly. The
+CLI coordinates the process-wide restart with every active bot chat, persists
+the handoff, and resumes interrupted user-facing turns after the new Bridge is
+listening. Direct PM2 commands bypass that contract and can interrupt all bots
+without preparation or completion cards.
+
+The first update that introduces this protocol may see a 404 from the still-old
+Bridge. `metabot update` permits that one compatibility handoff; subsequent
+updates require coordinated preparation. No database migration is involved.
+
+## Update and rollback
+
+```bash
+metabot update                                  # latest verified release
+metabot update --package --version 1.3.2        # known immutable release
+metabot doctor
+```
+
+Package overlays preserve `.env`, `bots.json`, `data/`, `logs/`, and user/Core
+state under `~/.metabot/` and `~/.metabot-core/`. If a new release fails your
+smoke checks, reinstall the previously known version explicitly instead of
+editing installed package files.
+
+Rollback does not require changing `sessions.db`. Reinstall the previous
+release and remove a stale `~/.metabot/controlled-restart.json` only after
+confirming no restart is in progress; older releases ignore that file.
+
+## Source deployments
+
+Source checkouts use an explicit path:
+
+```bash
+git pull --ff-only
+npm ci --include=dev
+npm test
+npm run build
+metabot update --git
+```
+
+Keep package-managed and source-managed installations separate. For the Web
+request path, see [Core Console architecture](../features/web-ui.md#architecture).

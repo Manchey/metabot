@@ -2,7 +2,8 @@ import { WebSocketServer, WebSocket } from 'ws';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import type { Server, IncomingMessage, ServerResponse } from 'node:http';
+import * as crypto from 'node:crypto';
+import type { Server, IncomingMessage } from 'node:http';
 import type { BotRegistry, BotInfo } from '../api/bot-registry.js';
 import type { Logger } from '../utils/logger.js';
 import type { CardState, PendingQuestion } from '../types.js';
@@ -11,6 +12,44 @@ import { ChatSubscriptionManager } from './chat-subscriptions.js';
 import { GroupManager, type ChatGroup } from './group-manager.js';
 import { StreamingASRSession, createStreamingASRSession, isStreamingASRAvailable } from '../api/streaming-asr.js';
 import type { SessionRegistry, SessionRecord, SessionMessage } from '../session/session-registry.js';
+import { resolveWithinRoot } from '../utils/managed-path.js';
+
+// ─── Timing-safe secret comparison ─────────────────────────────────────────
+
+/**
+ * Constant-time comparison of two secrets. Both inputs are hashed with SHA-256
+ * first so the comparison runs over fixed-length (32-byte) buffers — this both
+ * equalizes length (crypto.timingSafeEqual throws on length mismatch) and stops
+ * the comparison itself from leaking the secret length via timing. Returns false
+ * for any nullish input.
+ */
+export function timingSafeStrEqual(a: string | undefined | null, b: string | undefined | null): boolean {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  const ha = crypto.createHash('sha256').update(a).digest();
+  const hb = crypto.createHash('sha256').update(b).digest();
+  return crypto.timingSafeEqual(ha, hb);
+}
+
+export function bearerTokenFromAuthorization(value: string | string[] | undefined): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  return /^Bearer\s+/i.test(value) ? value.replace(/^Bearer\s+/i, '') : undefined;
+}
+
+export function bearerTokenFromWebSocketProtocol(value: string | string[] | undefined): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  for (const item of value.split(',')) {
+    const protocol = item.trim();
+    const match = /^metabot-bearer\.(.+)$/i.exec(protocol);
+    if (match) return match[1];
+  }
+  return undefined;
+}
+
+export function isWebSocketSecretAuthorized(secret: string | undefined, req: IncomingMessage): boolean {
+  if (!secret) return false;
+  return timingSafeStrEqual(bearerTokenFromAuthorization(req.headers.authorization), secret)
+    || timingSafeStrEqual(bearerTokenFromWebSocketProtocol(req.headers['sec-websocket-protocol']), secret);
+}
 
 // ─── Client → Server messages ──────────────────────────────────────────────
 
@@ -56,26 +95,6 @@ type ServerMessage =
   | { type: 'asr_error'; error: string }
   | { type: 'asr_stopped' }
   | { type: 'pong' };
-
-// ─── MIME types for static file serving ────────────────────────────────────
-
-const MIME_TYPES: Record<string, string> = {
-  '.html': 'text/html; charset=utf-8',
-  '.js': 'application/javascript; charset=utf-8',
-  '.css': 'text/css; charset=utf-8',
-  '.json': 'application/json; charset=utf-8',
-  '.png': 'image/png',
-  '.jpg': 'image/jpeg',
-  '.jpeg': 'image/jpeg',
-  '.gif': 'image/gif',
-  '.svg': 'image/svg+xml',
-  '.ico': 'image/x-icon',
-  '.woff': 'font/woff',
-  '.woff2': 'font/woff2',
-  '.ttf': 'font/ttf',
-  '.eot': 'application/vnd.ms-fontobject',
-  '.map': 'application/json',
-};
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
 
@@ -141,15 +160,11 @@ export function setupWebSocketServer(
       return;
     }
 
-    // Auth via ?token=SECRET query parameter (if secret is configured)
-    if (secret) {
-      const token = url.searchParams.get('token');
-      if (token !== secret) {
-        socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
-        socket.destroy();
-        wsLogger.warn('WebSocket connection rejected: invalid token');
-        return;
-      }
+    if (!isWebSocketSecretAuthorized(secret, req)) {
+      socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+      socket.destroy();
+      wsLogger.warn('WebSocket connection rejected: invalid token');
+      return;
     }
 
     wss.handleUpgrade(req, socket, head, (ws) => {
@@ -522,11 +537,20 @@ async function handleChat(
       onOutputFiles: (files) => {
         if (ws.readyState !== WebSocket.OPEN) return;
         // Copy output files to uploads dir so they're accessible via /api/files/
-        const uploadsDir = path.join(os.tmpdir(), 'metabot-uploads', chatId);
+        const uploadsRoot = path.resolve(path.join(os.tmpdir(), 'metabot-uploads'));
+        const uploadsDir = resolveWithinRoot(uploadsRoot, chatId);
+        if (!uploadsDir || uploadsDir === uploadsRoot) {
+          logger.warn({ chatId }, 'Refusing to copy output files outside the uploads root');
+          return;
+        }
         fs.mkdirSync(uploadsDir, { recursive: true });
         for (const file of files) {
           try {
-            const destPath = path.join(uploadsDir, file.fileName);
+            const destPath = resolveWithinRoot(uploadsDir, file.fileName);
+            if (!destPath || destPath === uploadsDir) {
+              logger.warn({ file: file.fileName }, 'Refusing to copy output file outside the chat uploads directory');
+              continue;
+            }
             fs.copyFileSync(file.filePath, destPath);
             const ext = file.extension.replace('.', '');
             const mimeMap: Record<string, string> = {
@@ -681,7 +705,7 @@ async function handleGroupChat(
 
   // Subscribe the client to the group chatId for receiving updates
   subscriptions.subscribe(chatId, ws);
-  // Subscribe to grouptalk chatIds so inter-bot mb talk calls are visible
+  // Subscribe to grouptalk chatIds so inter-bot metabot talk calls are visible
   for (const member of group.members) {
     subscriptions.subscribe(`grouptalk-${groupId}-${member}`, ws);
   }
@@ -734,91 +758,4 @@ function sendMessage(ws: WebSocket, msg: ServerMessage): void {
   if (ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify(msg));
   }
-}
-
-// ─── Static file serving ──────────────────────────────────────────────────
-
-/**
- * Serve static files from the `dist/web/` directory for `/web/*` requests.
- * Returns true if the request was handled, false otherwise.
- */
-export function serveStaticFiles(
-  req: IncomingMessage,
-  res: ServerResponse,
-  url: string,
-): boolean {
-  // Only handle GET /web/*
-  if (req.method !== 'GET') return false;
-
-  // Redirect /web to /web/
-  if (url === '/web') {
-    res.writeHead(301, { Location: '/web/' });
-    res.end();
-    return true;
-  }
-
-  if (!url.startsWith('/web/')) return false;
-
-  // Strip query string for file path resolution
-  const cleanUrl = url.includes('?') ? url.slice(0, url.indexOf('?')) : url;
-
-  // Resolve the file path relative to dist/web/
-  const webRoot = path.resolve(process.cwd(), 'dist', 'web');
-  let filePath = cleanUrl.slice('/web/'.length);
-
-  // Default to index.html for root
-  if (!filePath || filePath === '') {
-    filePath = 'index.html';
-  }
-
-  const fullPath = path.resolve(webRoot, filePath);
-
-  // Security: prevent directory traversal
-  if (!fullPath.startsWith(webRoot)) {
-    res.writeHead(403, { 'Content-Type': 'text/plain' });
-    res.end('Forbidden');
-    return true;
-  }
-
-  // Try to serve the file
-  try {
-    if (fs.existsSync(fullPath) && fs.statSync(fullPath).isFile()) {
-      const ext = path.extname(fullPath).toLowerCase();
-      const contentType = MIME_TYPES[ext] || 'application/octet-stream';
-      const content = fs.readFileSync(fullPath);
-      // Hashed assets get long cache; index.html gets no-cache
-      const isHashed = filePath.startsWith('assets/') && /-[a-zA-Z0-9]{8,}\./.test(filePath);
-      const cacheControl = isHashed ? 'public, max-age=31536000, immutable' : 'no-cache';
-      res.writeHead(200, { 'Content-Type': contentType, 'Cache-Control': cacheControl });
-      res.end(content);
-      return true;
-    }
-  } catch {
-    // Fall through to SPA fallback
-  }
-
-  // Asset files that don't exist should 404 (not SPA fallback)
-  if (filePath.startsWith('assets/')) {
-    res.writeHead(404, { 'Content-Type': 'text/plain' });
-    res.end('Not found');
-    return true;
-  }
-
-  // SPA fallback: serve index.html for any unmatched non-asset path
-  const indexPath = path.resolve(webRoot, 'index.html');
-  try {
-    if (fs.existsSync(indexPath)) {
-      const content = fs.readFileSync(indexPath);
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' });
-      res.end(content);
-      return true;
-    }
-  } catch {
-    // index.html not found
-  }
-
-  // dist/web/ doesn't exist yet
-  res.writeHead(404, { 'Content-Type': 'text/plain' });
-  res.end('Web UI not found. Build the web frontend first.');
-  return true;
 }

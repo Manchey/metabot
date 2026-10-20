@@ -1,100 +1,97 @@
 # Environment Variables
 
-All configuration is via `.env` file or system environment variables. Copy `.env.example` to `.env` to get started.
+Use `bots.json` for per-bot engine, workspace, and channel settings. Use `.env`
+for deployment-wide runtime configuration. Copy `.env.example` and add only the
+values you need.
 
-## MetaBot Core
+## Core and Bridge
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `BOTS_CONFIG` | — | Path to `bots.json` for multi-bot mode |
-| `FEISHU_APP_ID` | — | Feishu app ID (single-bot mode) |
-| `FEISHU_APP_SECRET` | — | Feishu app secret (single-bot mode) |
-| `API_PORT` | `9100` | HTTP API port |
-| `API_SECRET` | — | Bearer token auth for API and MetaMemory. Generate one with `openssl rand -hex 32` |
-| `LOG_LEVEL` | `info` | Log level (debug, info, warn, error) |
+| Variable                        | Default                 | Purpose                                                                      |
+| ------------------------------- | ----------------------- | ---------------------------------------------------------------------------- |
+| `BOTS_CONFIG`                   | —                       | Path to multi-bot configuration, normally `./bots.json`                      |
+| `METABOT_ENGINE`                | `codex`                 | Single-bot default: `codex`, `kimi`, or compatibility `claude`               |
+| `API_PORT`                      | `9100`                  | Local Bridge API port                                                        |
+| `API_SECRET`                    | —                       | Bridge Bearer secret; non-health API routes reject anonymous requests        |
+| `API_HOST` / `METABOT_API_HOST` | `127.0.0.1`             | Bridge bind address; use `0.0.0.0` only behind your own private/TLS boundary |
+| `METABOT_URL`                   | `http://localhost:9100` | Bridge URL used by local Bridge CLI commands                                 |
+| `METABOT_CORE_URL`              | `http://localhost:9200` | Core Console and delegated CLI URL                                           |
+| `METABOT_CORE_TOKEN`            | token file              | Overrides `~/.metabot-core/token`                                            |
+| `METABOT_CORE_HOST`             | `127.0.0.1`             | Core bind address                                                            |
+| `METABOT_CORE_PORT`             | `9200`                  | Core port                                                                    |
+| `METABOT_CORE_DATA_DIR`         | `~/.metabot-core/data`  | Core data directory                                                          |
+| `METABOT_PUBLIC_DISTRIBUTION`   | `0`                     | Serve Core install/CLI assets anonymously; enable only intentionally         |
+| `LOG_LEVEL`                     | `info`                  | Bridge log level                                                             |
 
-## Claude Code
+Memory, Skills, Agents, and T5T are served by Core at `METABOT_CORE_URL`. The
+old standalone MetaMemory variables and port `8100` are not part of the current
+Personal Edition.
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `DEFAULT_WORKING_DIRECTORY` | — | Working directory for Claude (single-bot mode) |
-| `CLAUDE_MAX_TURNS` | unlimited | Max turns per request |
-| `CLAUDE_MAX_BUDGET_USD` | unlimited | Max cost per request (USD) |
-| `CLAUDE_MODEL` | SDK default | Claude model to use |
-| `CLAUDE_EXECUTABLE_PATH` | auto-detect | Path to `claude` binary |
+## Workspace and engines
 
-## MetaMemory
+| Variable                           | Default                  | Purpose                                                       |
+| ---------------------------------- | ------------------------ | ------------------------------------------------------------- |
+| `CLAUDE_DEFAULT_WORKING_DIRECTORY` | —                        | Historical single-bot workspace variable used by every engine |
+| `CODEX_MODEL`                      | Codex default            | Codex model                                                   |
+| `CODEX_PROFILE`                    | —                        | Codex configuration profile                                   |
+| `CODEX_API_KEY`                    | login state              | OpenAI-compatible key, normalized to `OPENAI_API_KEY`         |
+| `CODEX_BASE_URL`                   | Codex default            | OpenAI-compatible API base URL                                |
+| `CODEX_APPROVAL_POLICY`            | `never`                  | Codex approval policy                                         |
+| `CODEX_SANDBOX`                    | `workspace-write`        | Codex sandbox mode                                            |
+| `CODEX_REASONING_EFFORT`           | —                        | `low`, `medium`, `high`, `xhigh`, `max`, or `ultra`           |
+| `CODEX_EXECUTABLE_PATH`            | auto                     | Codex binary path                                             |
+| `KIMI_CODE_SERVER_URL`             | `http://127.0.0.1:58627` | Existing local Kimi Server; otherwise started on demand       |
+| `KIMI_CODE_HOME`                   | `~/.kimi-code`           | Kimi configuration and local token directory                  |
+| `KIMI_API_KEY`                     | login state              | Optional provider key inherited by local Kimi Server          |
+| `CLAUDE_MODEL`                     | Claude default           | Compatibility-engine model                                    |
+| `CLAUDE_EXECUTABLE_PATH`           | auto                     | Claude compatibility binary path                              |
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MEMORY_ENABLED` | `true` | Enable embedded MetaMemory |
-| `MEMORY_PORT` | `8100` | MetaMemory port |
-| `MEMORY_SECRET` | `API_SECRET` | MetaMemory auth (legacy) |
-| `MEMORY_ADMIN_TOKEN` | — | Admin token (full access) |
-| `MEMORY_TOKEN` | — | Reader token (shared folders only) |
-| `META_MEMORY_URL` | `http://localhost:8100` | MetaMemory URL (for CLI remote access) |
+Prefer per-bot `workspace`, `engine`, model, sandbox, and Kimi permission
+settings in `bots.json`. See [Multi-Bot and Engines](multi-bot.md).
 
-## Feishu Service App
+## Channels
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `FEISHU_SERVICE_APP_ID` | — | Dedicated app for wiki sync & doc reader |
-| `FEISHU_SERVICE_APP_SECRET` | — | Service app secret |
+| Variable                                 | Default | Purpose                                                         |
+| ---------------------------------------- | ------- | --------------------------------------------------------------- |
+| `FEISHU_APP_ID`                          | —       | Single-bot Feishu/Lark App ID                                   |
+| `FEISHU_APP_SECRET`                      | —       | Single-bot Feishu/Lark App Secret                               |
+| `TELEGRAM_BOT_TOKEN`                     | —       | Single-bot Telegram token                                       |
+| `SLACK_BOT_TOKEN`                        | —       | Single-bot Slack bot token (`xoxb-...`)                         |
+| `SLACK_SIGNING_SECRET`                   | —       | Single-bot Slack Events API signing secret                      |
+| `SLACK_BOT_USER_ID`                      | auto    | Optional Slack bot user ID when startup cannot call `auth.test` |
+| `SLACK_GROUP_NO_MENTION`                 | `false` | Route all Slack channel messages instead of mention-only        |
+| `METABOT_FEISHU_WS_PING_TIMEOUT_SEC`     | `20`    | Feishu WebSocket pong timeout                                   |
+| `METABOT_FEISHU_WS_HANDSHAKE_TIMEOUT_MS` | `15000` | Feishu connect/reconnect timeout                                |
+| `METABOT_LOCAL_ADDRESS`                  | —       | Optional source IP for Feishu sockets                           |
 
-Falls back to the first Feishu bot's credentials if not set.
+Multi-bot deployments should store channel credentials in the protected
+`bots.json` rather than duplicating them in `.env`.
 
-## Wiki Sync
+## Optional services
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `WIKI_SYNC_ENABLED` | `true` | Enable MetaMemory → Wiki sync |
-| `WIKI_SPACE_ID` | — | Feishu Wiki space ID |
-| `WIKI_SPACE_NAME` | `MetaMemory` | Wiki space name |
-| `WIKI_AUTO_SYNC` | `true` | Auto-sync on changes |
-| `WIKI_AUTO_SYNC_DEBOUNCE_MS` | `5000` | Debounce delay |
-| `WIKI_SYNC_THROTTLE_MS` | `300` | Delay between API calls |
+| Variable                     | Default          | Purpose                                 |
+| ---------------------------- | ---------------- | --------------------------------------- |
+| `SCHEDULE_TIMEZONE`          | system timezone  | IANA timezone for cron tasks            |
+| `METABOT_PEERS`              | —                | Comma-separated peer URLs               |
+| `METABOT_PEER_SECRETS`       | —                | Positional secrets for peer URLs        |
+| `METABOT_PEER_NAMES`         | auto             | Positional peer display names           |
+| `METABOT_ALLOWED_PEER_CIDRS` | —                | Optional IPv4 CIDR forwarding allowlist |
+| `FEISHU_SERVICE_APP_ID`      | first Feishu bot | Optional Wiki/doc-reader service app    |
+| `FEISHU_SERVICE_APP_SECRET`  | first Feishu bot | Service app secret                      |
+| `WIKI_SYNC_ENABLED`          | `true`           | Enable optional Memory-to-Wiki sync     |
+| `WIKI_SPACE_ID`              | —                | Existing Wiki space ID                  |
+| `WIKI_SPACE_NAME`            | `MetaMemory`     | Wiki space name                         |
+| `VOLCENGINE_TTS_APPID`       | —                | Doubao STT/TTS App ID                   |
+| `VOLCENGINE_TTS_ACCESS_KEY`  | —                | Doubao STT/TTS access key               |
+| `OPENAI_API_KEY`             | —                | Optional Whisper/OpenAI TTS fallback    |
+| `ELEVENLABS_API_KEY`         | —                | Optional ElevenLabs TTS key             |
 
-## Peers Federation
+The complete provider and RTC variable list remains documented inline in
+`.env.example`, which is the source of truth for source deployments.
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `METABOT_PEERS` | — | Comma-separated peer URLs. Prefer HTTPS for internet-reachable peers; use plain HTTP only for localhost or a private overlay network |
-| `METABOT_PEER_SECRETS` | — | Comma-separated peer secrets (positional match) |
-| `METABOT_PEER_NAMES` | auto | Comma-separated peer names |
-| `METABOT_PEER_POLL_INTERVAL_MS` | `30000` | Peer poll interval |
+## Proxy
 
-## Remote Access
+Standard `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` variables are supported.
+Include `localhost` and `127.0.0.1` in `NO_PROXY` so Core, Bridge, and local Kimi
+Server traffic stays local.
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `METABOT_URL` | `http://localhost:9100` | MetaBot API URL for CLI. The default is local HTTP; for remote access prefer an HTTPS reverse proxy or a private-network address |
-| `META_MEMORY_URL` | `http://localhost:8100` | MetaMemory URL for CLI. The default is local HTTP; for remote access prefer an HTTPS reverse proxy or a private-network address |
-
-## Voice
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `VOLCENGINE_TTS_APPID` | — | Doubao STT + TTS (recommended) |
-| `VOLCENGINE_TTS_ACCESS_KEY` | — | Doubao STT + TTS (recommended) |
-| `VOLCENGINE_TTS_RESOURCE_ID` | `volc.service_type.10029` | Doubao TTS resource ID |
-| `OPENAI_API_KEY` | — | Fallback for Whisper STT + OpenAI TTS |
-| `ELEVENLABS_API_KEY` | — | ElevenLabs TTS |
-| `VOICE_MODEL` | — | Override Claude model for voice mode |
-
-## Third-Party AI Providers
-
-MetaBot supports any Anthropic-compatible API:
-
-```bash
-# Kimi/Moonshot
-ANTHROPIC_BASE_URL=https://api.moonshot.ai/anthropic
-ANTHROPIC_AUTH_TOKEN=your-key
-
-# DeepSeek
-ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic
-ANTHROPIC_AUTH_TOKEN=your-key
-
-# GLM/Zhipu
-ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic
-ANTHROPIC_AUTH_TOKEN=your-key
-```
+Never commit a populated `.env` or `bots.json`.

@@ -376,7 +376,10 @@ export class WechatClient {
     };
 
     fs.mkdirSync(dataDir, { recursive: true });
-    fs.writeFileSync(filePath, JSON.stringify(store, null, 2));
+    // Write atomically via tmp + rename so a crash mid-write can't corrupt the store.
+    const tmpPath = `${filePath}.tmp-${process.pid}`;
+    fs.writeFileSync(tmpPath, JSON.stringify(store, null, 2));
+    fs.renameSync(tmpPath, filePath);
     this.logger.info({ botName, filePath }, 'WeChat token saved');
   }
 

@@ -42,7 +42,9 @@
       "feishuAppSecret": "secret4",
       "defaultWorkingDirectory": "/home/user/project-delta",
       "codex": {
-        "model": "gpt-5.4-codex",
+        "model": "gpt-5.5",
+        "apiKey": "sk-optional-openai-compatible-key",
+        "baseUrl": "https://api.openai.com/v1",
         "approvalPolicy": "never",
         "sandbox": "workspace-write"
       }
@@ -61,6 +63,20 @@
       "name": "wechat-assistant",
       "description": "WeChat AI assistant via iLink",
       "defaultWorkingDirectory": "/home/user/project"
+    }
+  ],
+  "slackBots": [
+    {
+      "name": "slack-codex",
+      "description": "Codex-powered assistant via Slack DM or @mention",
+      "engine": "codex",
+      "slackBotToken": "xoxb-...",
+      "slackSigningSecret": "slack-signing-secret",
+      "defaultWorkingDirectory": "/home/user/project",
+      "codex": {
+        "approvalPolicy": "never",
+        "sandbox": "workspace-write"
+      }
     }
   ],
   "peers": [

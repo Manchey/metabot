@@ -7,76 +7,90 @@ export type {
   BackgroundEvent,
   BackgroundTaskStatus,
 } from '../types.js';
-import type { CardState, CardStatus } from '../types.js';
-
-function buildCtxBar(pct: number): string {
-  const filled = Math.min(Math.round(pct / 10), 10);
-  const color = pct > 80 ? '🟥' : pct >= 50 ? '🟧' : '🟩';
-  return color.repeat(filled) + '⬜'.repeat(10 - filled);
-}
-
-const STATUS_CONFIG: Record<CardStatus, { color: string; title: string; icon: string }> = {
-  thinking: { color: 'blue', title: 'Thinking...', icon: '🔵' },
-  running: { color: 'blue', title: 'Running...', icon: '🔵' },
-  complete: { color: 'green', title: 'Complete', icon: '🟢' },
-  error: { color: 'red', title: 'Error', icon: '🔴' },
-  waiting_for_input: { color: 'yellow', title: 'Waiting for Input', icon: '🟡' },
-};
-
-const BG_ICON: Record<'running' | 'completed' | 'failed' | 'stopped', string> = {
-  running: '⏳',
-  completed: '✅',
-  failed: '❌',
-  stopped: '⏹️',
-};
-
-function truncate(text: string, max: number): string {
-  if (text.length <= max) return text;
-  return text.slice(0, max) + '…';
-}
-
-const MAX_CONTENT_LENGTH = 28000;
-
-function truncateContent(text: string): string {
-  if (text.length <= MAX_CONTENT_LENGTH) return text;
-  const half = Math.floor(MAX_CONTENT_LENGTH / 2) - 50;
-  return (
-    text.slice(0, half) +
-    '\n\n... (content truncated) ...\n\n' +
-    text.slice(-half)
-  );
-}
+import type { CardState } from '../types.js';
+import {
+  STATUS_CONFIG,
+  BG_ICON,
+  truncate,
+  truncateContent,
+} from './card-builder-utils.js';
 
 export function buildCard(state: CardState): string {
   const config = STATUS_CONFIG[state.status];
   const elements: unknown[] = [];
 
-  // Tool calls section
-  if (state.toolCalls.length > 0) {
-    const isFinal = state.status === 'complete' || state.status === 'error';
-    if (isFinal) {
-      const counts = new Map<string, number>();
-      for (const t of state.toolCalls) counts.set(t.name, (counts.get(t.name) ?? 0) + 1);
-      const parts = Array.from(counts.entries())
-        .sort((a, b) => b[1] - a[1])
-        .map(([name, count]) => `${name}×${count}`);
-      const summary = `✅ **${state.toolCalls.length} tools** (${parts.join(', ')})`;
-      elements.push({
-        tag: 'markdown',
-        content: summary,
-      });
-      elements.push({ tag: 'hr' });
-    } else {
-      const toolLines = state.toolCalls.map((t) => {
-        const icon = t.status === 'running' ? '⏳' : '✅';
-        return `${icon} **${t.name}** ${t.detail}`;
-      });
-      elements.push({
-        tag: 'markdown',
-        content: toolLines.join('\n'),
-      });
-      elements.push({ tag: 'hr' });
+  // Goal badge — pinned at the top so users see at a glance that the
+  // session is in goal-driven mode (Claude /goal). Persists across turns
+  // until /goal clear or /reset.
+  if (state.goalCondition) {
+    elements.push({
+      tag: 'markdown',
+      content: `🎯 **Goal:** ${truncate(state.goalCondition, 200)}`,
+    });
+    elements.push({ tag: 'hr' });
+  }
+
+  // Agent Teams panel — teammates + shared task list. Driven by Claude
+  // Code's TaskCreated / TaskCompleted / TeammateIdle hooks; rendered here
+  // so the user sees the team state without having to switch panes.
+  if (state.teamState && (state.teamState.teammates.length > 0 || state.teamState.tasks.length > 0)) {
+    const ts = state.teamState;
+    const lines: string[] = [];
+    const header = ts.name ? `🧑‍🤝‍🧑 **Team:** \`${ts.name}\`` : '🧑‍🤝‍🧑 **Team**';
+    lines.push(header);
+    if (ts.teammates.length > 0) {
+      lines.push('');
+      lines.push('**Teammates:**');
+      for (const m of ts.teammates) {
+        const icon = m.status === 'working' ? '⏳' : '💤';
+        const subj = m.lastSubject ? ` — _${truncate(m.lastSubject, 60)}_` : '';
+        lines.push(`${icon} \`${m.name}\` (${m.status})${subj}`);
+      }
     }
+    if (ts.tasks.length > 0) {
+      // Show in-progress first, then most recent completions
+      const pending = ts.tasks.filter(t => t.status === 'pending');
+      const inProgress = ts.tasks.filter(t => t.status === 'in_progress');
+      const completed = ts.tasks.filter(t => t.status === 'completed').slice(-5);
+      lines.push('');
+      lines.push(`**Tasks:** ${pending.length} pending · ${inProgress.length} in progress · ${ts.tasks.filter(t => t.status === 'completed').length} done`);
+      for (const t of pending) {
+        const owner = t.teammate ? ` → \`${t.teammate}\`` : '';
+        lines.push(`◻️ ${truncate(t.subject, 80)}${owner}`);
+      }
+      for (const t of inProgress) {
+        const owner = t.teammate ? ` → \`${t.teammate}\`` : '';
+        lines.push(`⏳ ${truncate(t.subject, 80)}${owner}`);
+      }
+      for (const t of completed) {
+        const owner = t.teammate ? ` (\`${t.teammate}\`)` : '';
+        lines.push(`✅ ${truncate(t.subject, 80)}${owner}`);
+      }
+    }
+    elements.push({ tag: 'markdown', content: lines.join('\n') });
+    elements.push({ tag: 'hr' });
+  }
+
+  // Tool calls indicator — single line, no per-tool list. See the v2 builder
+  // for the rationale (users only care about the final answer; the running
+  // tool list was noise). One line while in flight so a hung run is visibly
+  // hung; section disappears entirely on complete/error.
+  // Keep the summary on an empty successful turn. Hiding it on every
+  // completed card assumes a final response body exists; tool-only turns
+  // would otherwise render as a blank "Complete" card with only the footer.
+  if (
+    state.toolCalls.length > 0 &&
+    state.status !== 'error' &&
+    (state.status !== 'complete' || !state.responseText.trim())
+  ) {
+    const last  = state.toolCalls[state.toolCalls.length - 1];
+    const icon  = last.status === 'running' ? '⏳' : '✅';
+    const total = state.toolCalls.length;
+    elements.push({
+      tag: 'markdown',
+      content: `${icon} **${last.name}** · ${total} tool${total > 1 ? 's' : ''}`,
+    });
+    elements.push({ tag: 'hr' });
   }
 
   // Background tasks (Monitor, etc.) — show live stdout events / final status
@@ -108,11 +122,20 @@ export function buildCard(state: CardState): string {
     });
   }
 
-  // Pending question section — interactive buttons + text-fallback hint
+  // Pending question section — text-only: numbered options + prominent
+  // "type the number" instruction. Buttons used to live here, but:
+  //   - Card Schema 2.0 mobile silently drops `tag: action` button blocks
+  //     (bug-feishu-v2-mobile-action-buttons), so buttons go invisible.
+  //   - Card Schema 1.0 buttons DO render on mobile, but clicks return
+  //     Feishu code 200340 (the click event never reaches us, suspected
+  //     v1 callbacks no longer route through `WSClient` persistent
+  //     connection in the v2 era — would require setting up an HTTP
+  //     webhook URL in the Feishu Open Platform app config).
+  // Decision: drop buttons entirely, default to typed answers. The text
+  // path is reliable on every Feishu surface (desktop / mobile / web).
   if (state.pendingQuestion) {
     elements.push({ tag: 'hr' });
-    state.pendingQuestion.questions.forEach((q, qi) => {
-      // Question prompt
+    state.pendingQuestion.questions.forEach((q) => {
       const descLines = q.options.map(
         (opt, i) => `**${i + 1}.** ${opt.label} — _${opt.description}_`,
       );
@@ -120,26 +143,10 @@ export function buildCard(state: CardState): string {
         tag: 'markdown',
         content: [`**[${q.header}] ${q.question}**`, '', ...descLines].join('\n'),
       });
-      // Interactive buttons: one per option + an explicit "Other" button
-      const actions = q.options.map((opt, oi) => ({
-        tag: 'button',
-        text: { tag: 'plain_text', content: `${oi + 1}. ${opt.label}` },
-        type: 'primary',
-        value: {
-          action: 'answer_question',
-          toolUseId: state.pendingQuestion!.toolUseId,
-          questionIndex: qi,
-          optionIndex: oi,
-        },
-      }));
-      elements.push({
-        tag: 'action',
-        actions,
-      });
     });
     elements.push({
       tag: 'markdown',
-      content: '_点击按钮选择，或直接输入自定义答案_',
+      content: '**👇 请回复数字（1/2/…）或直接输入文字答案**',
     });
   }
 
@@ -151,8 +158,8 @@ export function buildCard(state: CardState): string {
     });
   }
 
-  // Stats note — ctx usage, cost, model, duration (only on complete/error)
-  if (state.status === 'complete' || state.status === 'error') {
+  // Stats note — show context usage during all states, full stats on complete/error
+  {
     const parts: string[] = [];
     if (state.totalTokens && state.contextWindow) {
       const pct = Math.round((state.totalTokens / state.contextWindow) * 100);
@@ -160,17 +167,22 @@ export function buildCard(state: CardState): string {
         ? `${(state.totalTokens / 1000).toFixed(1)}k`
         : `${state.totalTokens}`;
       const ctxK = `${Math.round(state.contextWindow / 1000)}k`;
-      const bar = buildCtxBar(pct);
-      parts.push(`ctx ${tokensK}/${ctxK} (${pct}%) ${bar}`);
+      const color = pct >= 80 ? '🟥' : pct >= 50 ? '🟧' : '🟩';
+      const filled = Math.max(0, Math.min(10, Math.round(pct / 10)));
+      parts.push(`${color} ${'▰'.repeat(filled)}${'▱'.repeat(10 - filled)} ctx: ${tokensK}/${ctxK} (${pct}%)`);
     }
-    if (state.sessionCostUsd != null) {
-      parts.push(`$${state.sessionCostUsd.toFixed(2)}`);
-    }
-    if (state.model) {
-      parts.push(state.model.replace(/^claude-/, ''));
-    }
-    if (state.durationMs !== undefined) {
-      parts.push(`${(state.durationMs / 1000).toFixed(1)}s`);
+    if (state.status === 'complete' || state.status === 'error') {
+      if (state.sessionCostUsd != null) {
+        parts.push(`$${state.sessionCostUsd.toFixed(2)}`);
+      }
+      if (state.model) {
+        // Strip the claude- prefix (claude-opus-4-7 → opus-4-7) but keep the
+        // full Kimi model name since e.g. `for-coding` loses too much context.
+        parts.push(state.model.replace(/^claude-/, ''));
+      }
+      if (state.durationMs !== undefined) {
+        parts.push(`${(state.durationMs / 1000).toFixed(1)}s`);
+      }
     }
     if (parts.length > 0) {
       elements.push({

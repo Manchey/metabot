@@ -6,12 +6,28 @@ import type { IMessageSender } from '../bridge/message-sender.interface.js';
 
 export interface RegisteredBot {
   name: string;
-  platform: 'feishu' | 'telegram' | 'web' | 'wechat';
+  platform: 'feishu' | 'telegram' | 'web' | 'wechat' | 'slack';
   config: BotConfigBase;
   bridge: MessageBridge;
   sender: IMessageSender;
   /** Feishu SDK client (only for feishu platform bots). */
   feishuClient?: lark.Client;
+  /** Live external channel state, when the platform adapter exposes it. */
+  connectionStatus?: () => ChannelConnectionStatus;
+}
+
+export type ChannelConnectionState = 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'failed';
+
+export interface ChannelConnectionStatus {
+  state: ChannelConnectionState;
+  lastConnectTime?: number;
+  nextConnectTime?: number;
+  reconnectAttempts: number;
+}
+
+export interface BotChannelStatus extends ChannelConnectionStatus {
+  name: string;
+  platform: RegisteredBot['platform'];
 }
 
 /** Public DTO returned by list() — no secrets or internal refs. */
@@ -53,7 +69,7 @@ export class BotRegistry {
 
   get(name: string): RegisteredBot | undefined {
     // Try platform-qualified keys first
-    for (const prefix of ['feishu', 'telegram', 'web', 'wechat']) {
+    for (const prefix of ['feishu', 'telegram', 'web', 'wechat', 'slack']) {
       const bot = this.bots.get(`${prefix}:${name}`);
       if (bot) return bot;
     }
@@ -72,7 +88,7 @@ export class BotRegistry {
 
   deregister(name: string): boolean {
     // Try all platform-qualified keys
-    for (const prefix of ['feishu', 'telegram', 'web', 'wechat']) {
+    for (const prefix of ['feishu', 'telegram', 'web', 'wechat', 'slack']) {
       if (this.bots.delete(`${prefix}:${name}`)) return true;
     }
     return false;
@@ -81,6 +97,18 @@ export class BotRegistry {
   /** Return all registered bots with full internal info (bridge, sender, etc.) */
   listRegistered(): RegisteredBot[] {
     return Array.from(this.bots.values());
+  }
+
+  /** Authenticated diagnostics for external channel connections. */
+  listChannelStatuses(): BotChannelStatus[] {
+    return Array.from(this.bots.values()).flatMap((bot) => {
+      if (!bot.connectionStatus) return [];
+      try {
+        return [{ name: bot.name, platform: bot.platform, ...bot.connectionStatus() }];
+      } catch {
+        return [{ name: bot.name, platform: bot.platform, state: 'failed', reconnectAttempts: 0 }];
+      }
+    });
   }
 
   list(): BotInfo[] {

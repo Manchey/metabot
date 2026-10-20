@@ -1,25 +1,39 @@
 import * as fs from 'node:fs';
 import type * as lark from '@larksuiteoapi/node-sdk';
 import type { Logger } from '../utils/logger.js';
+import { feishuConversationId, parseFeishuConversation } from './conversation.js';
+import { getReplyMessageId } from '../bridge/reply-context.js';
 
 export class MessageSender {
   private userNameCache = new Map<string, string>();
+  private chatOwnerCache = new Map<string, { ownerId?: string; expiresAt: number }>();
 
   constructor(
     private client: lark.Client,
     private logger: Logger,
   ) {}
 
+  private async sendMessage(chatId: string, content: string, msgType: string) {
+    const destination = parseFeishuConversation(chatId);
+    const messageId = getReplyMessageId(chatId) || destination.rootMessageId;
+    const response = messageId
+      ? await this.client.im.v1.message.reply({
+        path: { message_id: messageId },
+        data: { content, msg_type: msgType, reply_in_thread: true },
+      })
+      : await this.client.im.v1.message.create({
+        params: { receive_id_type: 'chat_id' },
+        data: { receive_id: destination.chatId, content, msg_type: msgType },
+      });
+    if (response?.code) {
+      throw new Error(`Feishu message delivery failed (${response.code}): ${response.msg}`);
+    }
+    return response;
+  }
+
   async sendCard(chatId: string, cardContent: string): Promise<string | undefined> {
     try {
-      const resp = await this.client.im.v1.message.create({
-        params: { receive_id_type: 'chat_id' },
-        data: {
-          receive_id: chatId,
-          content: cardContent,
-          msg_type: 'interactive',
-        },
-      });
+      const resp = await this.sendMessage(chatId, cardContent, 'interactive');
 
       const messageId = resp?.data?.message_id;
       if (!messageId) {
@@ -32,36 +46,6 @@ export class MessageSender {
     }
   }
 
-  /**
-   * Reply to a message with a card, optionally in a thread.
-   * @param messageId - The message ID to reply to
-   * @param cardContent - The card JSON content
-   * @param replyInThread - If true, reply appears in the message's thread instead of main chat
-   * @returns The new message ID if successful
-   */
-  async replyCard(messageId: string, cardContent: string, replyInThread: boolean = false): Promise<string | undefined> {
-    try {
-      const resp = await this.client.im.v1.message.reply({
-        path: { message_id: messageId },
-        data: {
-          content: cardContent,
-          msg_type: 'interactive',
-          reply_in_thread: replyInThread,
-        },
-      });
-
-      const newMessageId = resp?.data?.message_id;
-      if (!newMessageId) {
-        this.logger.error({ resp }, 'Failed to get message_id from reply response');
-      }
-      this.logger.info({ messageId, newMessageId, replyInThread }, 'Card reply sent');
-      return newMessageId;
-    } catch (err) {
-      this.logger.error({ err, messageId, replyInThread }, 'Failed to reply card');
-      return undefined;
-    }
-  }
-
   async updateCard(messageId: string, cardContent: string): Promise<boolean> {
     try {
       await this.client.im.v1.message.patch({
@@ -69,11 +53,47 @@ export class MessageSender {
         data: { content: cardContent },
       });
       return true;
-    } catch (err: any) {
-      const apiMsg = err?.msg || err?.message || String(err);
-      const apiCode = err?.code || err?.error?.code;
-      this.logger.error({ err, messageId, apiCode, apiMsg, contentLen: cardContent?.length }, 'Failed to update card');
+    } catch (err) {
+      this.logger.error({ err, messageId }, 'Failed to update card');
       return false;
+    }
+  }
+
+  async getMessageConversation(chatId: string, messageId: string): Promise<string | undefined> {
+    try {
+      const response = await this.client.im.v1.message.get({ path: { message_id: messageId } });
+      const item = response?.data?.items?.[0];
+      if (response?.code || item?.chat_id !== chatId) return undefined;
+      return feishuConversationId({
+        chatId, messageId, chatType: '', text: '', userId: '',
+        rootMessageId: item.root_id, parentMessageId: item.parent_id, threadId: item.thread_id,
+      });
+    } catch (err) {
+      this.logger.warn({ err, messageId }, 'Could not resolve card conversation');
+      return undefined;
+    }
+  }
+
+  async getMessageText(chatId: string, messageId: string): Promise<string | undefined> {
+    try {
+      const response = await this.client.im.v1.message.get({ path: { message_id: messageId } });
+      const item = response?.data?.items?.[0];
+      if (response?.code || item?.chat_id !== chatId || !item.body?.content) return undefined;
+      const content: unknown = JSON.parse(item.body.content);
+      const texts: string[] = [];
+      const visit = (value: unknown, depth: number): void => {
+        if (depth > 20 || !value || typeof value !== 'object') return;
+        if (Array.isArray(value)) { value.forEach(child => visit(child, depth + 1)); return; }
+        const node = value as Record<string, unknown>;
+        if (typeof node.text === 'string') texts.push(node.text);
+        if (typeof node.content === 'string') texts.push(node.content);
+        for (const child of Object.values(node)) if (typeof child === 'object') visit(child, depth + 1);
+      };
+      visit(content, 0);
+      return texts.length ? `Referenced message (available text only):\n${texts.join('\n').slice(0, 24000)}` : undefined;
+    } catch (err) {
+      this.logger.warn({ err, messageId }, 'Could not read the thread origin');
+      return undefined;
     }
   }
 
@@ -138,14 +158,7 @@ export class MessageSender {
 
   async sendImage(chatId: string, imageKey: string): Promise<boolean> {
     try {
-      await this.client.im.v1.message.create({
-        params: { receive_id_type: 'chat_id' },
-        data: {
-          receive_id: chatId,
-          content: JSON.stringify({ image_key: imageKey }),
-          msg_type: 'image',
-        },
-      });
+      await this.sendMessage(chatId, JSON.stringify({ image_key: imageKey }), 'image');
       return true;
     } catch (err) {
       this.logger.error({ err, chatId, imageKey }, 'Failed to send image');
@@ -157,37 +170,6 @@ export class MessageSender {
     const imageKey = await this.uploadImage(filePath);
     if (!imageKey) return false;
     return this.sendImage(chatId, imageKey);
-  }
-
-  /**
-   * Reply to a message with an image, optionally in a thread.
-   * Uploads the image first, then replies with the image_key.
-   */
-  async replyImageFile(messageId: string, filePath: string, replyInThread: boolean = true): Promise<boolean> {
-    const imageKey = await this.uploadImage(filePath);
-    if (!imageKey) return false;
-    return this.replyImage(messageId, imageKey, replyInThread);
-  }
-
-  /**
-   * Reply to a message with an image key, optionally in a thread.
-   */
-  async replyImage(messageId: string, imageKey: string, replyInThread: boolean = true): Promise<boolean> {
-    try {
-      await this.client.im.v1.message.reply({
-        path: { message_id: messageId },
-        data: {
-          content: JSON.stringify({ image_key: imageKey }),
-          msg_type: 'image',
-          reply_in_thread: replyInThread,
-        },
-      });
-      this.logger.info({ messageId, imageKey, replyInThread }, 'Image reply sent');
-      return true;
-    } catch (err) {
-      this.logger.error({ err, messageId, imageKey, replyInThread }, 'Failed to reply image');
-      return false;
-    }
   }
 
   async uploadFile(filePath: string, fileName: string, fileType: string): Promise<string | undefined> {
@@ -212,14 +194,7 @@ export class MessageSender {
 
   async sendFile(chatId: string, fileKey: string): Promise<boolean> {
     try {
-      await this.client.im.v1.message.create({
-        params: { receive_id_type: 'chat_id' },
-        data: {
-          receive_id: chatId,
-          content: JSON.stringify({ file_key: fileKey }),
-          msg_type: 'file',
-        },
-      });
+      await this.sendMessage(chatId, JSON.stringify({ file_key: fileKey }), 'file');
       return true;
     } catch (err) {
       this.logger.error({ err, chatId, fileKey }, 'Failed to send file');
@@ -233,35 +208,20 @@ export class MessageSender {
     return this.sendFile(chatId, fileKey);
   }
 
-  /**
-   * Reply to a message with a file, optionally in a thread.
-   * Uploads the file first, then replies with the file_key.
-   */
-  async replyLocalFile(messageId: string, filePath: string, fileName: string, fileType: string, replyInThread: boolean = true): Promise<boolean> {
-    const fileKey = await this.uploadFile(filePath, fileName, fileType);
-    if (!fileKey) return false;
-    return this.replyFile(messageId, fileKey, replyInThread);
-  }
-
-  /**
-   * Reply to a message with a file key, optionally in a thread.
-   */
-  async replyFile(messageId: string, fileKey: string, replyInThread: boolean = true): Promise<boolean> {
+  async sendAudio(chatId: string, fileKey: string): Promise<boolean> {
     try {
-      await this.client.im.v1.message.reply({
-        path: { message_id: messageId },
-        data: {
-          content: JSON.stringify({ file_key: fileKey }),
-          msg_type: 'file',
-          reply_in_thread: replyInThread,
-        },
-      });
-      this.logger.info({ messageId, fileKey, replyInThread }, 'File reply sent');
+      await this.sendMessage(chatId, JSON.stringify({ file_key: fileKey }), 'audio');
       return true;
     } catch (err) {
-      this.logger.error({ err, messageId, fileKey, replyInThread }, 'Failed to reply file');
+      this.logger.error({ err, chatId, fileKey }, 'Failed to send audio');
       return false;
     }
+  }
+
+  async sendAudioFile(chatId: string, filePath: string, fileName: string): Promise<boolean> {
+    const fileKey = await this.uploadFile(filePath, fileName, 'opus');
+    if (!fileKey) return false;
+    return this.sendAudio(chatId, fileKey);
   }
 
   async getChatMemberCount(chatId: string): Promise<number | undefined> {
@@ -271,58 +231,43 @@ export class MessageSender {
       });
       const userCount = parseInt(resp?.data?.user_count, 10) || 0;
       const botCount = parseInt(resp?.data?.bot_count, 10) || 0;
-      const total = userCount + botCount;
-      this.logger.debug({ chatId, userCount, botCount, total }, 'Chat member count retrieved');
-      return total;
+      return userCount + botCount;
     } catch (err) {
-      this.logger.error({ err, chatId }, 'Failed to get chat member count (may need im:chat:readonly permission)');
+      this.logger.error({ err, chatId }, 'Failed to get chat member count');
+      return undefined;
+    }
+  }
+
+  async isChatOwner(chatId: string, userId: string): Promise<boolean | undefined> {
+    const cached = this.chatOwnerCache.get(chatId);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.ownerId === userId;
+    }
+
+    try {
+      const resp: any = await this.client.im.v1.chat.get({
+        params: { user_id_type: 'open_id' },
+        path: { chat_id: chatId },
+      });
+      const ownerId = resp?.data?.owner_id ?? resp?.owner_id;
+      this.chatOwnerCache.set(chatId, {
+        ownerId: typeof ownerId === 'string' ? ownerId : undefined,
+        expiresAt: Date.now() + 5 * 60 * 1000,
+      });
+      return typeof ownerId === 'string' ? ownerId === userId : undefined;
+    } catch (err) {
+      this.logger.error({ err, chatId, userId }, 'Failed to verify Feishu chat owner');
       return undefined;
     }
   }
 
   async sendText(chatId: string, text: string): Promise<void> {
     try {
-      await this.client.im.v1.message.create({
-        params: { receive_id_type: 'chat_id' },
-        data: {
-          receive_id: chatId,
-          content: JSON.stringify({ text }),
-          msg_type: 'text',
-        },
-      });
+      await this.sendMessage(chatId, JSON.stringify({ text }), 'text');
     } catch (err) {
       this.logger.error({ err, chatId }, 'Failed to send text');
     }
   }
-
-  /**
-   * Reply to a message with text, optionally in a thread.
-   * @param messageId - The message ID to reply to
-   * @param text - The text content
-   * @param replyInThread - If true, reply appears in the message's thread instead of main chat
-   */
-  async replyText(messageId: string, text: string, replyInThread: boolean = false): Promise<void> {
-    try {
-      await this.client.im.v1.message.reply({
-        path: { message_id: messageId },
-        data: {
-          content: JSON.stringify({ text }),
-          msg_type: 'text',
-          reply_in_thread: replyInThread,
-        },
-      });
-      this.logger.info({ messageId, replyInThread }, 'Text reply sent');
-    } catch (err) {
-      this.logger.error({ err, messageId, replyInThread }, 'Failed to reply text');
-    }
-  }
-
-  /**
-   * Add an emoji reaction to a message.
-   * @param messageId - The message ID to add reaction to
-   * @param emojiType - Emoji type, e.g. "OK", "DONE", "THUMBSUP", "HEART", "HOURGLASS"
-   * @returns reaction_id if successful, undefined otherwise
-   */
   async addReaction(messageId: string, emojiType: string): Promise<string | undefined> {
     try {
       const resp = await this.client.im.v1.messageReaction.create({

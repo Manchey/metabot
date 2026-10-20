@@ -40,14 +40,16 @@ export async function handleTaskRoutes(
     const body = await parseJsonBody(req);
     const rawBotName = body.botName as string;
     const chatId = body.chatId as string;
-    const prompt = body.prompt as string;
+    const prompt = (typeof body.prompt === 'string' && body.prompt.trim())
+      ? body.prompt as string
+      : (body.content as string);
     const sendCards = body.sendCards as boolean | undefined;
     const asyncMode = body.async === true;
     const callbackChatId = body.callbackChatId as string | undefined;
     const callbackBotName = body.callbackBotName as string | undefined;
 
     if (!rawBotName || !chatId || !prompt) {
-      jsonResponse(res, 400, { error: 'Missing required fields: botName, chatId, prompt' });
+      jsonResponse(res, 400, { error: 'Missing required fields: botName, chatId, prompt or content' });
       return true;
     }
 

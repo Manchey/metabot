@@ -1,87 +1,68 @@
 # MetaMemory
 
-Embedded knowledge store with full-text search. Agents read/write Markdown documents across sessions. Shared by all agents in the organization.
+MetaMemory is the persistent knowledge layer built into Core Console. It stores
+Markdown or HTML documents in a searchable folder tree and makes sharing an
+explicit per-document choice.
 
-## Overview
+## Where to use it
 
-MetaMemory is a **SQLite-based document store** (using FTS5 for full-text search) that provides persistent knowledge for all agents. It runs as an embedded server within MetaBot.
+- **Web:** open `http://localhost:9200/memory` and enter the local Core token.
+- **CLI:** use `metabot memory ...`; the retired `mm` binary is not supported.
+- **Agents:** install or enable the MetaMemory Skill so agents can search and
+  update knowledge during a run.
 
-- **Documents** are Markdown files organized in a folder tree
-- **Full-text search** via SQLite FTS5
-- **Web UI** at `http://localhost:8100?token=YOUR_TOKEN` for browsing and searching
-- **REST API** for programmatic access
-- **CLI** (`mm`) for terminal access
-
-## How Agents Use It
-
-Claude autonomously reads/writes memory documents via the `metamemory` skill. When users say "remember this" or Claude wants to persist knowledge, it calls the memory API.
-
-```
-Remember the deployment guide we just discussed — save it to MetaMemory
-under /projects/deployment.
-```
-
-```
-Search MetaMemory for our API design conventions.
-```
-
-## Chat Commands
-
-| Command | Description |
-|---------|-------------|
-| `/memory list` | Browse knowledge tree |
-| `/memory search <query>` | Search knowledge base |
-| `/memory status` | Show MetaMemory status |
-
-These commands get quick responses without spawning Claude — they use the `MemoryClient` HTTP client directly.
-
-## CLI (`mm`)
+## Essential commands
 
 ```bash
-# Read
-mm search "deployment guide"        # full-text search
-mm list                             # list documents
-mm folders                          # folder tree
-mm path /projects/my-doc            # get doc by path
+metabot memory search "deployment guide"
+metabot memory search "deployment guide" --limit 20 --offset 20
+metabot memory list
+metabot memory get <document-id>
+metabot memory path /users/me/project/guide
 
-# Write
-echo '# Notes' | mm create "Title" --folder ID --tags "dev"
-echo '# Updated' | mm update DOC_ID
-mm mkdir "new-folder"               # create folder
-mm delete DOC_ID                    # delete document
+metabot memory create "Guide" "# Deployment" --share --tags docs,release
+echo '# Updated guide' | metabot memory update <document-id>
+metabot memory share <document-id> on
+metabot memory mkdir project-notes --path /users/me/project-notes
+metabot memory delete <document-id>
+metabot memory health
 ```
 
-## Web UI Access
+`create` and `update` read content from standard input when the content argument
+is omitted. Use `--html` only for a complete HTML document; Markdown is the
+default.
 
-When auth is configured (`API_SECRET`, `MEMORY_ADMIN_TOKEN`, or `MEMORY_TOKEN`), the Web UI requires a token. Pass it via URL query parameter:
+Search results are ranked and capped at 100 per request. Use `--offset` with
+`--limit` to retrieve later pages. The Core Console search page exposes the
+same paging through its **load more** control.
 
+## Paths and sharing
+
+Paths organize documents but do not grant access. New writes default to your
+own `/users/<owner>/...` namespace. A document is cross-agent readable only
+when `shared=true`:
+
+```bash
+metabot memory visibility private   # default new documents to private
+metabot memory create "Private note" "..." --no-share
+metabot memory share <document-id> on
 ```
-http://localhost:8100?token=YOUR_TOKEN
+
+Keep credentials, device codes, and authorization URLs out of shared memory.
+
+## Connection
+
+The Personal Edition CLI defaults to the local Core:
+
+```bash
+export METABOT_CORE_URL=http://localhost:9200
+export METABOT_CORE_TOKEN="$(head -n 1 ~/.metabot-core/token)"
 ```
 
-The full URL with token is printed to logs on startup. The token is saved to `localStorage` in the browser, so you only need to pass it once. You can also set or clear the token from the settings icon in the Web UI.
+The token file is created with mode `0600`. Do not paste it into logs or docs.
 
-## Access Control
+## Optional Wiki sync
 
-MetaMemory supports folder-level ACL:
-
-| Token | Access |
-|-------|--------|
-| `MEMORY_ADMIN_TOKEN` | Full access — sees all folders |
-| `MEMORY_TOKEN` | Reader access — shared folders only |
-
-See [Security](../concepts/security.md#metamemory-access-control) for details.
-
-## Configuration
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MEMORY_ENABLED` | `true` | Enable MetaMemory |
-| `MEMORY_PORT` | `8100` | MetaMemory port |
-| `MEMORY_ADMIN_TOKEN` | — | Admin token (full access) |
-| `MEMORY_TOKEN` | — | Reader token (shared only) |
-| `META_MEMORY_URL` | `http://localhost:8100` | MetaMemory URL (for CLI) |
-
-## Auto-Sync to Wiki
-
-MetaMemory changes can automatically sync to a Feishu Wiki space. See [Wiki Sync](wiki-sync.md) for details.
+User-configured Feishu/Lark deployments can synchronize selected memory content
+to a Wiki space. This is optional and is not required by Personal Edition. See
+[Wiki Sync](wiki-sync.md).

@@ -1,0 +1,65 @@
+stages: [security, check, build]
+
+# Server-side pre-receive already runs gitleaks; this job re-runs it inside CI
+# so MR reviewers see the same result inline.
+secret-detection:
+  stage: security
+  image:
+    name: zricethezav/gitleaks:latest
+    entrypoint: [""]
+  script:
+    - gitleaks detect --source . --verbose
+  allow_failure: false
+
+# Matches the old GitHub Actions `check` job: type-check + tests + lint on
+# Node 20 and 22. The matrix is expressed as parallel CI jobs.
+.check-template: &check-template
+  stage: check
+  cache:
+    key:
+      files:
+        - package-lock.json
+    paths:
+      - node_modules/
+  script:
+    # `tsc -b` type-checks AND emits dist/ for the bridge + every composite
+    # workspace package (this is the monorepo successor to the old bare
+    # `tsc --noEmit` gate — root tsconfig is now solution-style). The package
+    # `exports` maps (e.g. cli-core's ./config → ./dist/config.js) only
+    # resolve once dist/ exists, so this MUST run before `npm test` (which
+    # exercises the workspace packages). Mirrors metabot-core's own CI shape
+    # (build → test against dist/).
+    - npm ci
+    - npx tsc -b
+    - npm test
+    - npm run lint
+
+check:node20:
+  <<: *check-template
+  image: node:20
+
+check:node22:
+  <<: *check-template
+  image: node:22
+
+# Matches the old GitHub Actions `build` job — runs once on Node 22 after
+# the type-check / test / lint matrix is green.
+build:
+  stage: build
+  image: node:22
+  needs:
+    - check:node22
+  cache:
+    key:
+      files:
+        - package-lock.json
+    paths:
+      - node_modules/
+    policy: pull
+  script:
+    - npm ci
+    - npm run build
+  artifacts:
+    paths:
+      - dist/
+    expire_in: 1 day

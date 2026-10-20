@@ -6,6 +6,7 @@ import type {
   ExecutorOptions,
   SDKMessage,
   ApiContext,
+  TeamEvent,
 } from './claude/executor.js';
 import type { CodexExecutor } from './codex/executor.js';
 import type { StreamProcessor } from './claude/stream-processor.js';
@@ -38,6 +39,9 @@ export interface Engine {
 export interface Executor {
   startExecution(options: ExecutorOptions): ExecutionHandle;
   execute(options: ExecutorOptions): AsyncGenerator<SDKMessage>;
+  /** Optional native mid-turn steering keyed by the bridge chat id. */
+  canSteer?(chatId: string): boolean;
+  steer?(chatId: string, prompt: string): Promise<'steered' | 'no-active-turn'>;
 }
 
 export type StreamProcessorLike = StreamProcessor;
@@ -49,6 +53,7 @@ export type {
   ExecutorOptions,
   SDKMessage,
   ApiContext,
+  TeamEvent,
 };
 
 /** Context passed to engine factory. */

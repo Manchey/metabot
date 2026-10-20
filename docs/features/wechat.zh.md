@@ -21,7 +21,7 @@ MetaBot 支持通过微信 ClawBot 插件（iLink Bot API）接入个人微信�
 运行安装器，IM 平台选择 `3) WeChat ClawBot`：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/xvirobotics/metabot/main/install.sh | bash
+curl -fsSL https://github.com/xvirobotics/metabot/releases/latest/download/install.sh | bash
 ```
 
 安装器会自动：
@@ -109,12 +109,12 @@ Waiting for scan...
 |------|------|--------|------|
 | `name` | 是 | — | Bot 标识名 |
 | `description` | 否 | — | Bot 描述 |
-| `defaultWorkingDirectory` | 是 | — | Claude 的工作目录 |
+| `defaultWorkingDirectory` | 是 | — | 所选 Agent 引擎的工作目录 |
 | `wechatBotToken` | 否 | — | 预认证的 iLink token（可选，不填则 QR 登录） |
 | `ilinkBaseUrl` | 否 | `https://ilinkai.weixin.qq.com` | iLink API 地址 |
 | `maxTurns` | 否 | 不限 | 最大对话轮次 |
 | `maxBudgetUsd` | 否 | 不限 | 单次最大花费 |
-| `model` | 否 | SDK 默认 | Claude 模型 |
+| `model` | 否 | 引擎默认 | 所选引擎的模型覆盖 |
 
 ## 环境变量模式
 

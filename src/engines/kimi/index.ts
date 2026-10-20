@@ -5,9 +5,9 @@ import { StreamProcessor } from '../claude/stream-processor.js';
 import { KimiExecutor } from './executor.js';
 
 /**
- * Kimi engine. Wraps `@moonshot-ai/kimi-agent-sdk` and reuses the Claude
- * `StreamProcessor` — the KimiExecutor translates Kimi's event stream into
- * Claude-shaped SDKMessage objects so the same card rendering logic applies.
+ * Kimi engine. Uses Kimi Code's official local Server API and reuses the
+ * Claude `StreamProcessor`, translating atomic frontend snapshots into the
+ * shared card event shape.
  */
 export class KimiEngine implements Engine {
   readonly name = 'kimi' as const;

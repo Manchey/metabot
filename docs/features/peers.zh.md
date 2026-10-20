@@ -33,7 +33,7 @@ Peers 实现了**联邦架构**，多个 MetaBot 实例可以互相发现 Bot �
     ```
 
     - `METABOT_PEERS` — 逗号分隔的 peer URL 列表（必填）
-    - `METABOT_PEER_SECRETS` — 逗号分隔的密钥，按位置与 URL 对应（可选，peer 设置了 `API_SECRET` 时需要）
+    - `METABOT_PEER_SECRETS` — 逗号分隔的 Bridge API 密钥，按位置与 URL 对应（非健康检查 peer API 调用必需）
     - `METABOT_PEER_NAMES` — 逗号分隔的显示名称（可选，不填会从 URL 自动推导，如 `localhost-9200`）
 
 === "bots.json"
@@ -60,21 +60,23 @@ Peers 实现了**联邦架构**，多个 MetaBot 实例可以互相发现 Bot �
 
     - `name` — peer 的显示名称（必填）
     - `url` — peer 的 API 地址（必填）
-    - `secret` — 对方的 `API_SECRET`（可选，对方开启认证时需要）
+    - `secret` — 对方的 `API_SECRET`（非健康检查 peer API 调用必需）
+
+Peer URL 只应暴露在 loopback、私有网络，或自有鉴权 HTTPS 反向代理之后。
 
 !!! tip "不需要 bots.json"
     如果你只运行一个 Bot，直接在 `.env` 加 `METABOT_PEERS` 就行，不需要 `bots.json`。`bots.json` 的 peers 字段只是多 Bot 配置的便利选项。
 
-## 限定名
+## 限定名 {#qualified-names}
 
 使用 `peerName/botName` 语法精确路由：
 
 ```bash
 # 自动路由 — 先查本地，再按顺序查 peer
-mb talk backend-bot chatId "修复这个 bug"
+metabot talk backend-bot chatId "修复这个 bug"
 
 # 指定 peer — 直接路由到 alice 的 backend-bot
-mb talk alice/backend-bot chatId "修复这个 bug"
+metabot talk alice/backend-bot chatId "修复这个 bug"
 ```
 
 ## API
@@ -88,9 +90,9 @@ mb talk alice/backend-bot chatId "修复这个 bug"
 ## CLI
 
 ```bash
-mb peers                            # 列出 peer 及状态
-mb bots                             # 列出所有 Bot（含 peer）
-mb talk alice/bot chatId "prompt"   # 指定 peer 的 Bot 对话
+metabot peers                            # 列出 peer 及状态
+metabot bots                             # 列出所有 Bot（含 peer）
+metabot talk alice/bot chatId "prompt"   # 指定 peer 的 Bot 对话
 ```
 
 ## 健康监控

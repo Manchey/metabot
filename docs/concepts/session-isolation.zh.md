@@ -12,9 +12,13 @@
 
 ## 群聊行为
 
-- **群聊** — Bot 仅在被 **@提及** 时响应
-- **2 人群**（1 个用户 + 1 个 Bot）— 视为私聊，无需 @提及
+- **多人群** — 默认使用 `mention`，只有准确 @ 当前 Bot 才会触发
+- **2 人群**（1 个用户 + 1 个 Bot）— 默认使用 `all`，行为类似私聊
 - **私聊** — Bot 回复所有消息
+
+群主可以使用 `@Bot /group-reply mention` 或 `@Bot /group-reply all`
+修改模式。显式模式按 Bot 和 `chatId` 隔离并持久化，优先于
+`groupNoMention` 和两人群默认规则。详见[聊天命令](../usage/chat-commands.md#group-reply-modes)。
 
 群成员数量缓存 5 分钟，避免频繁 API 调用。
 
@@ -30,8 +34,9 @@
 
 ## Bot 隔离
 
-多 Bot 模式下（通过 `bots.json`），各 Bot 之间完全隔离：
+多 Bot 模式下（通过 `bots.json`），各 Bot 的会话和群回复模式完全隔离：
 
 - 各自拥有独立的飞书/Telegram 应用，只接收自己的消息
 - 独立的会话存储
+- 每个群拥有独立持久化的回复模式
 - 独立的工作目录和配置

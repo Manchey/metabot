@@ -1,73 +1,146 @@
 # Troubleshooting
 
-## "Error: Claude Code process exited with code 1"
-
-The bot starts but replies with this error when you message it. There are two distinct causes:
-
-### Cause A: Claude CLI not authenticated
-
-The SDK spawns `claude` as a child process — if it has no valid credentials, it exits immediately with code 1.
-
-**Fix** (run in a **separate terminal**, not inside Claude Code):
+Start with the supported runtime and the built-in diagnostics:
 
 ```bash
-# Option A: OAuth login
-claude login
-
-# Option B: API key — add to .env
-echo 'ANTHROPIC_API_KEY=sk-ant-your-key' >> /path/to/metabot/.env
+node --version                 # must be >= 22.19
+metabot status
+metabot doctor
+metabot health
 ```
 
-Then restart the service:
+## Core Console does not open
+
+The Personal Edition console is `http://localhost:9200`; port `9100` is the
+Bridge API, not a second Web UI.
 
 ```bash
+metabot status
+curl -fsS http://localhost:9200/health
 metabot restart
-# or: pkill -f "tsx src/index.ts" && cd /path/to/metabot && npm run dev
 ```
 
-!!! warning
-    You cannot run `claude login` or `claude auth status` from inside a Claude Code session (nested sessions are blocked). Always use a separate terminal.
-
-### Cause B: Running as root/sudo
-
-Claude Code refuses to run `--dangerously-skip-permissions` under root privileges — the subprocess exits with code 1 immediately, even if authentication is valid. This is common when metabot runs as the `root` user (e.g. on a VPS or inside a Docker container with the default root user).
-
-You can confirm this is the cause by checking `pm2 logs metabot` for:
-
-```
---dangerously-skip-permissions cannot be used with root/sudo privileges
-```
-
-**Fix:** This is handled automatically since [this fix](https://github.com/xvirobotics/metabot/pull/213). When metabot detects it is running as root, it switches to `permissionMode: auto` (which auto-approves all tool permissions without requiring `--dangerously-skip-permissions`). Make sure you are on a version that includes this fix, then restart:
+Use the token stored at `~/.metabot-core/token`. The file should be readable
+only by your user:
 
 ```bash
-git pull && npm run build && metabot restart
+stat -c '%a %n' ~/.metabot-core/token   # expected: 600
 ```
 
-If you prefer a more permanent solution, run metabot as a non-root user.
+Do not paste the token into an issue or log. For a remote console, put Core
+behind your own authenticated HTTPS reverse proxy or private network.
 
-## Service Won't Connect to Feishu
+## Codex does not start
 
-If the service starts but Feishu events don't arrive:
+Authenticate in a standalone terminal, then restart MetaBot:
 
-1. Ensure the Feishu app event subscription mode is **"persistent connection"** (WebSocket), not HTTP callback
-2. The service must be **running before** you save the event subscription config — Feishu validates the WS connection on save
-3. Check that `im.message.receive_v1` event is subscribed
-4. Ensure the app version is **published and enabled** in the Feishu dev console
+```bash
+codex login
+codex --version
+metabot restart
+```
 
-## Bot Doesn't Reply in Group Chats
+MetaBot uses `codex exec --json` and resume. Check `metabot logs` for the exact
+CLI exit reason and confirm the Bot workspace exists and is writable.
 
-The bot only responds when **@mentioned** in group chats. In DMs it replies to all messages. This is by design.
+## Kimi Code does not connect
 
-Exception: **2-member groups** (1 user + 1 bot) are treated like DMs — no @mention required.
+Kimi support requires Kimi Code 0.27 or newer and its official loopback Server
+API:
 
-## FAQ
+```bash
+npm install -g @moonshot-ai/kimi-code@latest
+kimi login
+kimi --version
+metabot restart
+```
 
-**No public IP needed?**
-:   Correct. Feishu uses WebSocket, Telegram uses long polling. No incoming ports needed.
+Legacy Python `kimi-cli --wire` configuration is not compatible with this
+adapter. Keep the Kimi server on loopback; MetaBot rejects non-loopback server
+URLs by default.
 
-**Non-Claude models?**
-:   Yes. Any Anthropic-compatible API works (Kimi, DeepSeek, GLM, etc.). Set `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN`.
+If logs mention `unknown option '--work-dir'`, `unknown option '--wire'`, or an
+SDK command line that includes those flags, the running MetaBot is an older
+Kimi adapter. Update MetaBot and restart the Bridge:
 
-**Agent communication?**
-:   Currently synchronous request-response via the Agent Bus. Agents talk to each other using `mb talk` or the `/api/talk` endpoint. Async bidirectional protocols are on the roadmap.
+```bash
+metabot update
+metabot restart
+```
+
+The current adapter talks to Kimi Code 0.27+ through the local `/api/v1` Server
+API and does not spawn the removed `--wire --work-dir` path.
+
+## Feishu/Lark receives no messages
+
+1. Select **persistent connection** rather than an HTTP callback.
+2. Start MetaBot before saving the event subscription.
+3. Subscribe to `im.message.receive_v1`.
+4. Publish and enable the app version.
+5. Confirm the configured App ID and secret belong to the same app.
+
+See [Feishu App Setup](getting-started/feishu-app-setup.md).
+
+## A group bot does not reply
+
+Groups default to exact `@Bot` routing. Mention the intended bot, then inspect
+the current reply mode:
+
+```text
+@Bot /group-reply status
+@Bot /group-reply mention
+@Bot /group-reply all
+```
+
+Only the group owner can change the mode. The app needs `im:chat:readonly` to
+verify ownership; lookup failures are fail-closed and do not change settings.
+
+## Update failed
+
+Package updates verify both `SHA256SUMS` and the Personal Edition manifest
+before replacing code:
+
+```bash
+metabot update
+metabot doctor
+```
+
+For a reproducible rollback, install a known release explicitly:
+
+```bash
+metabot update --package --version 1.3.2
+```
+
+Updates preserve `.env`, `bots.json`, `data/`, `logs/`, `~/.metabot/`, and
+`~/.metabot-core/`. If the checksum or manifest does not match, do not bypass
+the check; retry from the official GitHub Release.
+
+## Claude Code compatibility
+
+Claude is optional for existing workspaces. Run `claude login` in a standalone
+terminal and select `"engine": "claude"` for that bot. Codex and Kimi Code are
+the primary Personal Edition engines.
+
+### Claude-compatible providers return `529 overloaded_error`
+
+`529 overloaded_error` is returned by the upstream Claude-compatible provider
+or model gateway. MetaBot cannot turn that into local capacity, but it can help
+you prove whether the mobile/Bridge path is using a different provider profile
+from standalone Claude Code:
+
+1. Reproduce once from the Bridge path and copy only the redacted error line,
+   timestamp, model, and upstream request id if present.
+2. Compare the Bridge service environment with the standalone terminal that
+   works: provider base URL, API key source, model, profile, proxy variables,
+   and workspace.
+3. Check the bot config for `claude.model`, `claude.env`, `model`, and any
+   provider-specific override.
+4. If the environments match, treat it as upstream rate limiting: retry later,
+   switch model/provider account, or ask the provider to raise quota.
+
+Do not paste API keys, bearer tokens, or full environment dumps into GitHub
+issues.
+
+If the issue remains, include the MetaBot version, operating system, selected
+engine, `metabot doctor` output with secrets removed, and the smallest relevant
+log excerpt in a GitHub issue.

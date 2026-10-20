@@ -2,7 +2,7 @@ import { WebSocket } from 'ws';
 
 /**
  * Pub/sub manager: maps chatId → Set<WebSocket>.
- * Enables `mb talk` API and group chat to stream responses to WS clients
+ * Enables `metabot talk` API and group chat to stream responses to WS clients
  * that are watching a given chatId.
  */
 export class ChatSubscriptionManager {

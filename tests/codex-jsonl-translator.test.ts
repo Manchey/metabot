@@ -41,7 +41,7 @@ describe('Codex JSONL translator', () => {
       { type: 'turn.completed', usage: { input_tokens: 23111, cached_input_tokens: 12800, output_tokens: 70 } },
     ];
 
-    const state = createCodexTranslatorState({ model: 'gpt-5.4-codex', contextWindow: 400000 });
+    const state = createCodexTranslatorState({ model: 'gpt-5.5', contextWindow: 400000 });
     const processor = new StreamProcessor('Run pwd');
 
     let cardState = processor.processMessage({ type: 'system' });
@@ -55,11 +55,91 @@ describe('Codex JSONL translator', () => {
     expect(cardState.status).toBe('complete');
     expect(cardState.responseText).toBe('DONE');
     expect(cardState.toolCalls).toEqual([{ name: 'Bash', detail: '`/bin/zsh -lc pwd`', status: 'done' }]);
-    expect(cardState.model).toBe('gpt-5.4-codex');
-    // Context window is an INPUT limit, so totalTokens = inputTokens only (23111),
-    // not inputTokens + outputTokens (23181).
+    expect(cardState.model).toBe('gpt-5.5');
     expect(cardState.totalTokens).toBe(23111);
     expect(cardState.contextWindow).toBe(400000);
+  });
+
+  it('uses Codex token_count last_token_usage for ctx instead of cumulative totals', () => {
+    const events: CodexJsonEvent[] = [
+      { type: 'thread.started', thread_id: 'codex-thread' },
+      { type: 'item.completed', item: { id: 'msg', type: 'agent_message', text: 'done' } },
+      {
+        type: 'event_msg',
+        payload: {
+          type: 'token_count',
+          info: {
+            total_token_usage: {
+              input_tokens: 25_444_800,
+              cached_input_tokens: 25_000_000,
+              output_tokens: 300,
+              total_tokens: 25_445_100,
+            },
+            last_token_usage: {
+              input_tokens: 83_767,
+              cached_input_tokens: 75_648,
+              output_tokens: 314,
+              total_tokens: 84_081,
+            },
+            model_context_window: 258_400,
+          },
+        },
+      },
+      {
+        type: 'turn.completed',
+        usage: {
+          input_tokens: 25_444_800,
+          cached_input_tokens: 25_000_000,
+          output_tokens: 300,
+          total_tokens: 25_445_100,
+        },
+      },
+    ];
+
+    const state = createCodexTranslatorState({ model: 'gpt-5.5', contextWindow: 272_000 });
+    const processor = new StreamProcessor('test ctx');
+    let cardState = processor.processMessage({ type: 'system' });
+    for (const event of events) {
+      for (const message of translateCodexJsonEvent(event, state)) {
+        cardState = processor.processMessage(message);
+      }
+    }
+
+    expect(cardState.status).toBe('complete');
+    expect(cardState.totalTokens).toBe(83_767);
+    expect(cardState.contextWindow).toBe(258_400);
+  });
+
+  it('suppresses Codex ctx when only cumulative turn usage is available', () => {
+    const state = createCodexTranslatorState({ model: 'gpt-5.5', contextWindow: 272_000 });
+    const processor = new StreamProcessor('hello');
+    let cardState = processor.processMessage({ type: 'system' });
+
+    for (const message of translateCodexJsonEvent(
+      { type: 'item.completed', item: { id: 'msg', type: 'agent_message', text: 'hi' } },
+      state,
+    )) {
+      cardState = processor.processMessage(message);
+    }
+    for (const message of translateCodexJsonEvent(
+      {
+        type: 'turn.completed',
+        usage: {
+          input_tokens: 2_205_693,
+          cached_input_tokens: 2_077_056,
+          output_tokens: 55,
+          total_tokens: 2_205_748,
+        },
+      },
+      state,
+    )) {
+      cardState = processor.processMessage(message);
+    }
+
+    expect(cardState.status).toBe('complete');
+    expect(cardState.model).toBe('gpt-5.5');
+    expect(cardState.totalTokens).toBe(0);
+    expect(cardState.contextWindow).toBe(0);
   });
 
   it('maps failed turns to error results', () => {

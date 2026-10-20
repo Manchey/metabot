@@ -20,8 +20,6 @@ export interface TelegramBotHandle {
 export async function startTelegramBot(
   config: TelegramBotConfig,
   logger: Logger,
-  memoryServerUrl: string,
-  memorySecret?: string,
 ): Promise<TelegramBotHandle> {
   const botLogger = logger.child({ bot: config.name });
 
@@ -38,7 +36,7 @@ export async function startTelegramBot(
 
   const bot = new Bot(config.telegram.botToken, botOptions);
   const sender = new TelegramSender(bot, botLogger);
-  const bridge = new MessageBridge(config, botLogger, sender, memoryServerUrl, memorySecret);
+  const bridge = new MessageBridge(config, botLogger, sender);
 
   // Install grammY error handler before polling starts.
   bot.catch((err) => {

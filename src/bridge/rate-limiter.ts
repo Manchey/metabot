@@ -12,7 +12,7 @@ export class RateLimiter {
     if (elapsed >= this.intervalMs) {
       // Can send immediately
       this.lastSent = now;
-      fn();
+      void Promise.resolve(fn()).catch(() => {});
     } else {
       // Queue for later, replacing any pending update
       this.pending = fn;
@@ -25,7 +25,7 @@ export class RateLimiter {
             this.lastSent = Date.now();
             const pendingFn = this.pending;
             this.pending = null;
-            pendingFn();
+            void Promise.resolve(pendingFn()).catch(() => {});
           }
         }, delay);
       }

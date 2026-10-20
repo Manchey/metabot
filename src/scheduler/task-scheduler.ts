@@ -11,6 +11,7 @@ import { isValidCron, nextCronOccurrence, getDefaultTimezone } from './cron-util
 // --- One-time task types (unchanged) ---
 
 export interface ScheduledTask {
+  originMessageId?: string;
   id: string;
   botName: string;
   chatId: string;
@@ -18,21 +19,23 @@ export interface ScheduledTask {
   executeAt: number;       // Unix ms
   sendCards: boolean;
   label?: string;
-  originMessageId?: string; // messageId of the user message that created this task — used for thread reply
   status: 'pending' | 'executing' | 'completed' | 'failed' | 'cancelled';
   createdAt: number;
   retryCount: number;
+  /** Stable idempotency key for system-created tasks such as restart recovery. */
+  dedupeKey?: string;
   parentRecurringId?: string;  // set if spawned by a recurring task
 }
 
 export interface ScheduleInput {
+  originMessageId?: string;
   botName: string;
   chatId: string;
   prompt: string;
   delaySeconds: number;
   sendCards?: boolean;
   label?: string;
-  originMessageId?: string; // messageId of the user message that created this task
+  dedupeKey?: string;
 }
 
 export interface ScheduleUpdateInput {
@@ -45,6 +48,7 @@ export interface ScheduleUpdateInput {
 // --- Recurring task types ---
 
 export interface RecurringTask {
+  originMessageId?: string;
   id: string;
   botName: string;
   chatId: string;
@@ -53,7 +57,6 @@ export interface RecurringTask {
   timezone: string;           // IANA timezone, e.g. "Asia/Shanghai"
   sendCards: boolean;
   label?: string;
-  originMessageId?: string;   // messageId of the user message that created this task — used for thread reply
   status: 'active' | 'paused' | 'cancelled';
   createdAt: number;          // Unix ms
   nextExecuteAt: number;      // Unix ms — precomputed next fire time
@@ -62,6 +65,7 @@ export interface RecurringTask {
 }
 
 export interface RecurringScheduleInput {
+  originMessageId?: string;
   botName: string;
   chatId: string;
   prompt: string;
@@ -69,7 +73,6 @@ export interface RecurringScheduleInput {
   timezone?: string;
   sendCards?: boolean;
   label?: string;
-  originMessageId?: string; // messageId of the user message that created this task
 }
 
 export interface RecurringUpdateInput {
@@ -93,8 +96,12 @@ const MAX_RETRIES = 5;
 const RETRY_DELAY_MS = 30_000; // 30 seconds
 const STALE_THRESHOLD_MS = 24 * 60 * 60 * 1000; // 24 hours
 const MAX_SETTIMEOUT_MS = 2_147_483_647; // 2^31 - 1 (~24.8 days)
-const PERSIST_DIR = path.join(os.homedir(), '.metabot');
-const PERSIST_FILE = path.join(PERSIST_DIR, 'scheduled-tasks.json');
+// Honor SESSION_STORE_DIR so a secondary metabot instance (same working tree,
+// different PM2 app) can isolate its scheduled-tasks.json instead of racing the
+// production instance over the same plain-JSON file (no WAL → full rewrites).
+function resolvePersistDir(): string {
+  return process.env.SESSION_STORE_DIR || path.join(os.homedir(), '.metabot');
+}
 
 /**
  * Manages scheduled tasks (one-time and recurring) with persistence and timers.
@@ -106,11 +113,15 @@ export class TaskScheduler {
   private recurringTasks = new Map<string, RecurringTask>();
   private recurringTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private wsHandle?: WebSocketHandle;
+  private persistDir: string;
+  private persistFile: string;
 
   constructor(
     private registry: BotRegistry,
     private logger: Logger,
   ) {
+    this.persistDir = resolvePersistDir();
+    this.persistFile = path.join(this.persistDir, 'scheduled-tasks.json');
     this.loadFromDisk();
   }
 
@@ -122,6 +133,18 @@ export class TaskScheduler {
   // ===== One-time task methods (unchanged) =====
 
   scheduleTask(input: ScheduleInput): ScheduledTask {
+    if (input.dedupeKey) {
+      const existing = Array.from(this.tasks.values()).find(
+        (task) => task.dedupeKey === input.dedupeKey && task.status !== 'cancelled',
+      );
+      if (existing) {
+        this.logger.info(
+          { taskId: existing.id, dedupeKey: input.dedupeKey, status: existing.status },
+          'Scheduled task deduplicated',
+        );
+        return existing;
+      }
+    }
     const now = Date.now();
     const task: ScheduledTask = {
       id: crypto.randomUUID(),
@@ -132,6 +155,7 @@ export class TaskScheduler {
       sendCards: input.sendCards ?? true,
       label: input.label,
       originMessageId: input.originMessageId,
+      dedupeKey: input.dedupeKey,
       status: 'pending',
       createdAt: now,
       retryCount: 0,
@@ -341,6 +365,18 @@ export class TaskScheduler {
 
   private setTimer(task: ScheduledTask): void {
     const delay = Math.max(0, task.executeAt - Date.now());
+
+    // Node overflows delays longer than ~24.8 days to 1 ms. Wait in chunks
+    // and recalculate the remaining delay before executing the task.
+    if (delay > MAX_SETTIMEOUT_MS) {
+      const timer = setTimeout(() => {
+        this.timers.delete(task.id);
+        this.setTimer(task);
+      }, MAX_SETTIMEOUT_MS);
+      this.timers.set(task.id, timer);
+      return;
+    }
+
     const timer = setTimeout(() => this.fireTask(task.id), delay);
     this.timers.set(task.id, timer);
   }
@@ -390,16 +426,11 @@ export class TaskScheduler {
     // Execute the task
     task.status = 'executing';
     this.saveToDisk();
-    this.logger.info({ taskId: id, botName: task.botName, chatId: task.chatId, originMessageId: task.originMessageId }, 'Firing scheduled task');
+    this.logger.info({ taskId: id, botName: task.botName, chatId: task.chatId }, 'Firing scheduled task');
 
-    // Add HOURGLASS reaction to origin message to indicate task is running
-    let hourglassReactionId: string | undefined;
+    let waitingReaction: string | undefined;
     if (task.originMessageId) {
-      try {
-        hourglassReactionId = await bot.sender.addReaction(task.originMessageId, 'HOURGLASS');
-      } catch (err) {
-        this.logger.warn({ err, taskId: id, originMessageId: task.originMessageId }, 'Failed to add HOURGLASS reaction');
-      }
+      try { waitingReaction = await bot.sender.addReaction?.(task.originMessageId, 'HOURGLASS'); } catch { /* best effort */ }
     }
 
     // Generate a messageId for WebSocket streaming
@@ -410,8 +441,8 @@ export class TaskScheduler {
         prompt: task.prompt,
         chatId: task.chatId,
         userId: 'scheduler',
-        sendCards: task.sendCards,
         replyToMessageId: task.originMessageId,
+        sendCards: task.sendCards,
         onUpdate: (state: CardState, _bridgeMessageId: string, final: boolean) => {
           // Stream updates to any WebSocket client subscribed to this chatId
           if (this.wsHandle) {
@@ -432,18 +463,11 @@ export class TaskScheduler {
       task.status = 'failed';
     }
 
-    // Remove HOURGLASS reaction and add completion reaction
     if (task.originMessageId) {
       try {
-        if (hourglassReactionId) {
-          await bot.sender.removeReaction(task.originMessageId, hourglassReactionId);
-        }
-        if (task.status === 'completed') {
-          await bot.sender.addReaction(task.originMessageId, 'DONE');
-        }
-      } catch (err) {
-        this.logger.warn({ err, taskId: id, originMessageId: task.originMessageId }, 'Failed to update completion reaction');
-      }
+        if (waitingReaction) await bot.sender.removeReaction?.(task.originMessageId, waitingReaction);
+        if (task.status === 'completed') await bot.sender.addReaction?.(task.originMessageId, 'DONE');
+      } catch { /* best effort */ }
     }
 
     this.saveToDisk();
@@ -485,11 +509,11 @@ export class TaskScheduler {
       executeAt: Date.now(),
       sendCards: recurring.sendCards,
       label: recurring.label ? `${recurring.label} (recurring)` : undefined,
-      originMessageId: recurring.originMessageId,
       status: 'pending',
       createdAt: Date.now(),
       retryCount: 0,
       parentRecurringId: recurring.id,
+      originMessageId: recurring.originMessageId,
     };
 
     this.tasks.set(child.id, child);
@@ -524,7 +548,7 @@ export class TaskScheduler {
 
   private saveToDisk(): void {
     try {
-      fs.mkdirSync(PERSIST_DIR, { recursive: true });
+      fs.mkdirSync(this.persistDir, { recursive: true });
       // Prune old completed/failed child tasks to prevent unbounded growth
       const tasks = Array.from(this.tasks.values()).filter((t) => {
         if (t.parentRecurringId && (t.status === 'completed' || t.status === 'failed')) {
@@ -537,7 +561,7 @@ export class TaskScheduler {
         tasks,
         recurringTasks: Array.from(this.recurringTasks.values()),
       };
-      fs.writeFileSync(PERSIST_FILE, JSON.stringify(data, null, 2));
+      fs.writeFileSync(this.persistFile, JSON.stringify(data, null, 2));
     } catch (err) {
       this.logger.error({ err }, 'Failed to save scheduled tasks to disk');
     }
@@ -545,9 +569,9 @@ export class TaskScheduler {
 
   private loadFromDisk(): void {
     try {
-      if (!fs.existsSync(PERSIST_FILE)) return;
+      if (!fs.existsSync(this.persistFile)) return;
 
-      const raw = fs.readFileSync(PERSIST_FILE, 'utf-8');
+      const raw = fs.readFileSync(this.persistFile, 'utf-8');
       const parsed = JSON.parse(raw);
       const now = Date.now();
 

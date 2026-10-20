@@ -12,16 +12,20 @@ const mockLogger = {
 } as any;
 
 describe('OutputsManager', () => {
+  let testRoot: string;
   let tmpDir: string;
   let manager: OutputsManager;
 
   beforeEach(() => {
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'metabot-test-'));
+    testRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'metabot-test-'));
+    tmpDir = path.join(testRoot, 'outputs');
+    fs.mkdirSync(tmpDir);
     manager = new OutputsManager(tmpDir, mockLogger);
   });
 
   afterEach(() => {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    vi.useRealTimers();
+    fs.rmSync(testRoot, { recursive: true, force: true });
   });
 
   describe('prepareDir', () => {
@@ -49,11 +53,35 @@ describe('OutputsManager', () => {
       const dir2 = manager.prepareDir('chat-123');
       expect(fs.readdirSync(dir2)).not.toContain('old.txt');
     });
+
+    it('rejects chat IDs that escape the outputs root', () => {
+      const outsideDir = path.join(testRoot, 'outside');
+      fs.mkdirSync(outsideDir);
+      const outsideFile = path.join(outsideDir, 'old.txt');
+      fs.writeFileSync(outsideFile, 'must remain');
+      const oldTime = new Date(Date.now() - 10 * 60 * 1000);
+      fs.utimesSync(outsideFile, oldTime, oldTime);
+
+      expect(() => manager.prepareDir('../outside')).toThrow(/outside the outputs root/i);
+      expect(fs.readFileSync(outsideFile, 'utf8')).toBe('must remain');
+    });
+
+    it('rejects chat IDs that resolve to the outputs root itself', () => {
+      expect(() => manager.prepareDir('.')).toThrow(/outside the outputs root/i);
+    });
   });
 
   describe('scanOutputs', () => {
     it('returns empty for non-existent directory', () => {
       expect(manager.scanOutputs('/nonexistent')).toEqual([]);
+    });
+
+    it('does not scan files outside the outputs root', () => {
+      const outsideDir = path.join(testRoot, 'outside');
+      fs.mkdirSync(outsideDir);
+      fs.writeFileSync(path.join(outsideDir, 'secret.txt'), 'must not be returned');
+
+      expect(manager.scanOutputs(outsideDir)).toEqual([]);
     });
 
     it('detects image files', () => {
@@ -122,6 +150,18 @@ describe('OutputsManager', () => {
 
     it('handles non-existent directory gracefully', () => {
       expect(() => manager.cleanup('/nonexistent/path')).not.toThrow();
+    });
+
+    it('does not schedule cleanup outside the outputs root', () => {
+      vi.useFakeTimers();
+      const outsideDir = path.join(testRoot, 'outside');
+      fs.mkdirSync(outsideDir);
+      fs.writeFileSync(path.join(outsideDir, 'keep.txt'), 'must remain');
+
+      manager.cleanup(outsideDir);
+      vi.advanceTimersByTime(5 * 60 * 1000 + 100);
+
+      expect(fs.readFileSync(path.join(outsideDir, 'keep.txt'), 'utf8')).toBe('must remain');
     });
   });
 

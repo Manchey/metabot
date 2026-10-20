@@ -1,248 +1,314 @@
-import { readFileSync } from 'node:fs';
-import { createSession, isLoggedIn, KimiPaths, parseConfig } from '@moonshot-ai/kimi-agent-sdk';
-import type { Session, Turn, StreamEvent, RunResult } from '@moonshot-ai/kimi-agent-sdk';
 import type { BotConfigBase } from '../../config.js';
 import type { Logger } from '../../utils/logger.js';
-import type {
-  ApiContext,
-  ExecutionHandle,
-  ExecutorOptions,
-  SDKMessage,
-} from '../claude/executor.js';
+import type { ApiContext, ExecutionHandle, ExecutorOptions, SDKMessage } from '../claude/executor.js';
+import { buildMetaBotApiPromptContext } from '../prompt-context.js';
+import {
+  KimiDaemonClient,
+  type KimiPendingQuestion,
+  type KimiPermissionMode,
+  type KimiSessionSnapshot,
+  type KimiSessionStatus,
+  type KimiSubagentTask,
+  type KimiWireMessage,
+} from './daemon-client.js';
+
+const SNAPSHOT_POLL_MS = 350;
+
+export interface KimiClientLike {
+  resolveModel(configured?: string): Promise<{ id: string; displayName: string }>;
+  openSession(cwd: string, sessionId?: string, model?: string): Promise<{ id: string }>;
+  getSnapshot(sessionId: string): Promise<KimiSessionSnapshot>;
+  getStatus(sessionId: string): Promise<KimiSessionStatus>;
+  getGoal(sessionId: string): Promise<Record<string, unknown> | null>;
+  submitPrompt(
+    sessionId: string,
+    text: string,
+    options?: { model?: string; thinking?: string; goalObjective?: string; permissionMode?: KimiPermissionMode },
+  ): Promise<{ prompt_id: string; status: 'running' | 'queued' | 'blocked' }>;
+  steer(sessionId: string, text: string, options?: { model?: string; thinking?: string }): Promise<void>;
+  abortSession(sessionId: string): Promise<void>;
+  setGoal(sessionId: string, objective: string): Promise<void>;
+  controlGoal(sessionId: string, action: 'pause' | 'resume' | 'cancel'): Promise<void>;
+  approve(sessionId: string, approvalId: string): Promise<void>;
+  respondQuestion(sessionId: string, question: KimiPendingQuestion, answers: Record<string, string>): Promise<void>;
+}
+
+interface ActiveKimiTurn {
+  sessionId?: string;
+  model?: string;
+  thinking?: string;
+  pendingSteers: number;
+  ready: Promise<void>;
+  resolveReady: () => void;
+  rejectReady: (error: unknown) => void;
+}
+
+interface KimiTurnState {
+  sessionId: string;
+  model: string;
+  contextWindow: number;
+  startTime: number;
+  baselineMessageIds: Set<string>;
+  emittedText: string;
+  toolInputs: Map<string, string>;
+  completedTools: Set<string>;
+  pendingQuestions: Map<string, KimiPendingQuestion>;
+  emittedQuestions: Set<string>;
+  approvedRequests: Set<string>;
+  subagentStates: Map<string, string>;
+  lastSnapshot?: KimiSessionSnapshot;
+}
 
 /**
- * Executor that drives `@moonshot-ai/kimi-agent-sdk` and translates its
- * event stream into Claude-shaped `SDKMessage` objects, so that the existing
- * `StreamProcessor` (which understands Claude's event shape) can render
- * Kimi sessions as Feishu cards without further changes.
+ * Kimi Code 0.27 executor backed by the official local Server API.
  *
- * Mapping (Kimi event → emitted SDKMessage):
- *   TurnBegin                      → system/init (carries session_id)
- *   ContentPart{type:'text'}       → stream_event(content_block_delta text_delta)
- *                                   + final assistant/text block when turn ends
- *   ContentPart{type:'think'}      → skipped (no equivalent card rendering yet)
- *   ToolCall                       → assistant/tool_use block
- *   ToolResult                     → user/tool_result block
- *   StatusUpdate                   → tracked locally for token usage
- *   TurnEnd + awaited RunResult    → result/success (or error for cancelled)
- *
- * Auth: the Kimi SDK spawns the `kimi` CLI which inherits OAuth tokens from
- * `~/.kimi/config.toml`. We pre-flight with `isLoggedIn()` and throw a clear
- * error if the user hasn't logged in — mirroring the Claude "run `claude login`"
- * troubleshooting path.
+ * This is the same frontend contract used by Kimi's own web UI. It gives the
+ * Feishu bridge durable Sessions, atomic live snapshots, native prompt queue
+ * steering, questions, cancellation, usage, and subagent activity without a
+ * bespoke runner or a long-lived per-chat process.
  */
 export class KimiExecutor {
-  constructor(
-    private config: BotConfigBase,
-    private logger: Logger,
-  ) {}
+  private readonly client: KimiClientLike;
+  private readonly activeTurns = new Map<string, ActiveKimiTurn>();
 
-  /**
-   * Pre-flight auth check. Runs once per executor construction.
-   * Using `isLoggedIn()` from the Kimi SDK which checks `~/.kimi/config.toml`.
-   */
-  private assertLoggedIn(): void {
-    try {
-      if (!isLoggedIn()) {
-        throw new Error(
-          'Kimi CLI is not logged in. Run `kimi login` in a separate terminal ' +
-          'to authenticate with your Moonshot subscription, then restart MetaBot.'
-        );
-      }
-    } catch (err: any) {
-      if (err.message?.includes('Kimi CLI is not logged in')) throw err;
-      this.logger.warn({ err }, 'Kimi isLoggedIn() check failed — continuing and letting SDK surface the real error');
-    }
+  constructor(
+    private readonly config: BotConfigBase,
+    private readonly logger: Logger,
+    client?: KimiClientLike,
+  ) {
+    this.client =
+      client ??
+      new KimiDaemonClient({
+        executable: config.kimi?.executable,
+        serverUrl: config.kimi?.serverUrl,
+        apiKey: config.kimi?.apiKey,
+      });
   }
 
   startExecution(options: ExecutorOptions): ExecutionHandle {
     const { prompt, cwd, sessionId, abortController, outputsDir, apiContext } = options;
-
-    this.assertLoggedIn();
-
-    this.logger.info(
-      { cwd, hasSession: !!sessionId, outputsDir, engine: 'kimi' },
-      'Starting Kimi execution (multi-turn)',
-    );
-
-    const session = this.createKimiSession(cwd, sessionId, options);
-
-    // The Kimi SDK has no `systemPrompt.append` equivalent. We prepend the
-    // MetaBot context (outputs directory, bot identity, group membership)
-    // to the user's message so Kimi bots receive the same instructions
-    // Claude bots do.
-    const fullPrompt = this.buildPromptWithContext(prompt, outputsDir, apiContext);
-    const turn: Turn = session.prompt(fullPrompt);
-
-    // Wire abort signal → turn.interrupt(). Kimi's SDK doesn't accept an
-    // AbortSignal directly, so we forward cancellation manually.
-    if (abortController.signal.aborted) {
-      turn.interrupt().catch(() => { /* already aborting */ });
-    } else {
-      abortController.signal.addEventListener(
-        'abort',
-        () => {
-          this.logger.info({ sessionId: session.sessionId }, 'Kimi turn aborted via signal');
-          turn.interrupt().catch((err) => this.logger.warn({ err }, 'turn.interrupt() rejected'));
-        },
-        { once: true },
-      );
-    }
-
-    // Local state used when accumulating deltas for the final assistant message
-    const kimiOpts = this.config.kimi ?? {};
-    const rawModel = session.model ?? options.model ?? kimiOpts.model ?? this.resolveDefaultModel();
-    const state: TurnState = {
-      sessionId: session.sessionId,
-      accumulatedText: '',
-      openToolCalls: new Map(),
-      startTime: Date.now(),
-      // Use the user-facing display name when available (e.g. "Kimi-k2.6"
-      // instead of "kimi-for-coding") so the Feishu card footer matches what
-      // users see in the Kimi CLI.
-      model: this.resolveDisplayName(rawModel) ?? rawModel,
-      // Kimi for Coding ships with a 256k context window. Override per-bot via
-      // `kimi.contextWindow` in bots.json if you're on a different model.
-      contextWindow: kimiOpts.contextWindow ?? 262144,
+    const turnKey = apiContext?.chatId ?? sessionId ?? `kimi:${Date.now()}`;
+    let resolveReady!: () => void;
+    let rejectReady!: (error: unknown) => void;
+    const ready = new Promise<void>((resolve, reject) => {
+      resolveReady = resolve;
+      rejectReady = reject;
+    });
+    // A failed launch may have no steering waiter. Mark the rejection handled
+    // while preserving it for callers that do await active.ready.
+    void ready.catch(() => undefined);
+    const active: ActiveKimiTurn = {
+      pendingSteers: 0,
+      ready,
+      resolveReady,
+      rejectReady,
     };
+    this.activeTurns.set(turnKey, active);
 
+    const abort = () => {
+      const sid = active.sessionId;
+      if (sid) {
+        void this.client
+          .abortSession(sid)
+          .catch((error) =>
+            this.logger.warn({ error, sessionId: sid, engine: 'kimi' }, 'Failed to abort Kimi session'),
+          );
+      }
+    };
+    if (abortController.signal.aborted) abort();
+    else abortController.signal.addEventListener('abort', abort, { once: true });
+
+    const client = this.client;
+    const config = this.config;
     const logger = this.logger;
-
-    async function* wrapStream(): AsyncGenerator<SDKMessage> {
-      // Emit a synthetic init message so StreamProcessor captures session_id
-      yield {
-        type: 'system',
-        subtype: 'init',
-        session_id: state.sessionId,
-      };
-
+    const activeTurns = this.activeTurns;
+    const buildPromptWithContext = this.buildPromptWithContext.bind(this);
+    const resolveQuestion = this.resolveQuestion.bind(this);
+    let turnState: KimiTurnState | undefined;
+    async function* stream(): AsyncGenerator<SDKMessage> {
       try {
-        for await (const event of turn) {
-          const emitted = translateEvent(event, state, logger);
-          for (const msg of emitted) yield msg;
+        const model = await client.resolveModel(options.model ?? config.kimi?.model);
+        const session = await client.openSession(cwd, sessionId, model.id);
+        active.sessionId = session.id;
+        active.model = model.id;
+        active.thinking = config.kimi?.thinking === undefined ? undefined : config.kimi.thinking ? 'high' : 'off';
+
+        const initial = await client.getSnapshot(session.id);
+        turnState = {
+          sessionId: session.id,
+          model: model.displayName,
+          contextWindow: config.kimi?.contextWindow ?? 1_048_576,
+          startTime: Date.now(),
+          baselineMessageIds: new Set(initial.messages.items.map((message) => message.id)),
+          emittedText: '',
+          toolInputs: new Map(),
+          completedTools: new Set(),
+          pendingQuestions: new Map(),
+          emittedQuestions: new Set(),
+          approvedRequests: new Set(),
+          subagentStates: new Map(),
+        };
+        const state = turnState;
+
+        yield { type: 'system', subtype: 'init', session_id: session.id };
+
+        if (abortController.signal.aborted) {
+          await client.abortSession(session.id).catch(() => undefined);
+          throw abortError();
         }
 
-        // Turn iterator finished — await the RunResult for final status
-        const result: RunResult = await turn.result;
-        yield buildResultMessage(result, state);
-      } catch (err: any) {
-        if (abortController.signal.aborted || err?.name === 'AbortError') {
-          logger.info({ sessionId: state.sessionId }, 'Kimi execution aborted');
-          // Emit a cancelled-style result so the bridge still closes the card
+        const goal = parseGoalCommand(prompt);
+        if (goal.kind === 'control') {
+          await client.controlGoal(session.id, goal.action);
+          const result = goal.action === 'cancel' ? 'Goal cancelled.' : `Goal ${goal.action}d.`;
+          active.resolveReady();
+          yield localResult(session.id, state, result);
+          return;
+        }
+        if (goal.kind === 'status') {
+          const current = await client.getGoal(session.id);
+          const text = current ? formatGoalStatus(current) : 'No active Kimi goal.';
+          active.resolveReady();
+          yield localResult(session.id, state, text);
+          return;
+        }
+        if (goal.kind === 'start') await client.setGoal(session.id, goal.objective);
+
+        const fullPrompt = buildPromptWithContext(
+          goal.kind === 'start' ? goal.objective : prompt,
+          outputsDir,
+          apiContext,
+        );
+        const submitted = await client.submitPrompt(session.id, fullPrompt, {
+          model: model.id,
+          thinking: active.thinking,
+          permissionMode: config.kimi?.permissionMode ?? 'auto',
+        });
+        if (submitted.status === 'blocked') throw new Error('Kimi Code blocked the prompt before execution');
+        active.resolveReady();
+
+        for (;;) {
+          const snapshot = await client.getSnapshot(session.id);
+          state.lastSnapshot = snapshot;
+
+          if (snapshot.pending_approvals.length > 0) {
+            if (config.kimi?.permissionMode === 'yolo') {
+              for (const approval of snapshot.pending_approvals) {
+                if (state.approvedRequests.has(approval.approval_id)) continue;
+                state.approvedRequests.add(approval.approval_id);
+                await client.approve(session.id, approval.approval_id);
+              }
+            } else {
+              await client.abortSession(session.id).catch(() => undefined);
+              throw new Error(
+                'Kimi Code requested a tool approval that MetaBot did not auto-approve. ' +
+                'Run the action directly in Kimi Code, or explicitly set kimi.permissionMode to "yolo" only for a trusted workspace.',
+              );
+            }
+          }
+
+          for (const message of translateSnapshot(snapshot, state)) yield message;
+
+          if (
+            !snapshot.session.busy &&
+            snapshot.in_flight_turn === null &&
+            snapshot.pending_questions.length === 0 &&
+            active.pendingSteers === 0
+          ) {
+            break;
+          }
+          if (abortController.signal.aborted && !snapshot.session.busy) break;
+          await sleep(SNAPSHOT_POLL_MS);
+        }
+
+        const status = await client.getStatus(session.id).catch(() => undefined);
+        if (status) {
+          state.contextWindow = status.max_context_tokens || state.contextWindow;
+          if (status.model) state.model = status.model;
+        }
+        yield buildResult(state, status, abortController.signal.aborted);
+      } catch (error) {
+        active.rejectReady(error);
+        if (abortController.signal.aborted || (error instanceof Error && error.name === 'AbortError')) {
           yield {
             type: 'result',
             subtype: 'error_cancelled',
-            session_id: state.sessionId,
-            duration_ms: Date.now() - state.startTime,
+            session_id: turnState?.sessionId ?? sessionId,
+            duration_ms: turnState ? Date.now() - turnState.startTime : 0,
             is_error: true,
             errors: ['Aborted by user'],
           };
-          return;
+        } else {
+          logger.error({ error, engine: 'kimi', cwd }, 'Kimi Code execution failed');
+          yield {
+            type: 'result',
+            subtype: 'error_during_execution',
+            session_id: turnState?.sessionId ?? sessionId,
+            duration_ms: turnState ? Date.now() - turnState.startTime : 0,
+            is_error: true,
+            errors: [error instanceof Error ? error.message : String(error)],
+          };
         }
-        logger.error({ err, sessionId: state.sessionId }, 'Kimi execution failed');
-        yield {
-          type: 'result',
-          subtype: 'error_during_execution',
-          session_id: state.sessionId,
-          duration_ms: Date.now() - state.startTime,
-          is_error: true,
-          errors: [err?.message || String(err)],
-        };
       } finally {
-        // Always close the Kimi session — sessionId is persisted on disk so
-        // the next turn resumes by passing the same sessionId.
-        try {
-          await session.close();
-        } catch (err) {
-          logger.warn({ err, sessionId: state.sessionId }, 'Failed to close Kimi session');
-        }
+        abortController.signal.removeEventListener('abort', abort);
+        if (activeTurns.get(turnKey) === active) activeTurns.delete(turnKey);
       }
     }
 
     return {
-      stream: wrapStream(),
-      sendAnswer: (_toolUseId: string, _sid: string, _answerText: string) => {
-        // Kimi uses `turn.respondQuestion(...)` for QuestionRequest events.
-        // Phase 2 MVP: AskUserQuestion is not yet wired through for Kimi.
-        // Log and no-op so the bridge doesn't crash.
-        logger.warn({ engine: 'kimi' }, 'sendAnswer called on Kimi executor — not yet implemented');
+      stream: stream(),
+      sendAnswer: (toolUseId: string, _sid: string, answerText: string) => {
+        const question = turnState?.pendingQuestions.get(toolUseId);
+        if (!question || !active.sessionId) return;
+        const answers = Object.fromEntries(question.questions.map((item) => [item.question, answerText]));
+        void resolveQuestion(active.sessionId, question, answers);
       },
-      resolveQuestion: (_toolUseId: string, _answers: Record<string, string>) => {
-        logger.warn({ engine: 'kimi' }, 'resolveQuestion called on Kimi executor — not yet implemented');
+      resolveQuestion: (toolUseId: string, answers: Record<string, string>) => {
+        const question = turnState?.pendingQuestions.get(toolUseId);
+        if (!question || !active.sessionId) return;
+        void resolveQuestion(active.sessionId, question, answers);
       },
-      finish: () => {
-        // No input queue to close — single-turn model.
-      },
+      finish: () => undefined,
     };
   }
 
   async *execute(options: ExecutorOptions): AsyncGenerator<SDKMessage> {
     const handle = this.startExecution(options);
     try {
-      for await (const msg of handle.stream) {
-        yield msg;
-      }
+      for await (const message of handle.stream) yield message;
     } finally {
       handle.finish();
     }
   }
 
-  private createKimiSession(
-    cwd: string,
-    sessionId: string | undefined,
-    options: ExecutorOptions,
-  ): Session {
-    const kimiOpts = this.config.kimi ?? {};
-    return createSession({
-      workDir: cwd,
-      sessionId,
-      model: options.model ?? kimiOpts.model,
-      thinking: kimiOpts.thinking,
-      yoloMode: true,
-      executable: kimiOpts.executable,
-    });
+  canSteer(chatId: string): boolean {
+    return this.activeTurns.has(chatId);
   }
 
-  /** Read the Kimi CLI's default model ID from `~/.kimi/config.toml`. */
-  private resolveDefaultModel(): string {
+  async steer(chatId: string, prompt: string): Promise<'steered' | 'no-active-turn'> {
+    const active = this.activeTurns.get(chatId);
+    if (!active) return 'no-active-turn';
+    active.pendingSteers += 1;
     try {
-      const cfg = parseConfig();
-      if (cfg.defaultModel) return cfg.defaultModel;
-    } catch (err) {
-      this.logger.warn({ err }, 'Kimi parseConfig failed — falling back to kimi-for-coding');
+      await active.ready;
+      if (!active.sessionId) return 'no-active-turn';
+      await this.client.steer(active.sessionId, prompt, { model: active.model, thinking: active.thinking });
+      return 'steered';
+    } finally {
+      active.pendingSteers -= 1;
     }
-    return 'kimi-for-coding';
   }
 
-  /**
-   * Look up `display_name` for `modelId` in the Kimi config TOML. The SDK's
-   * `parseConfig()` only exposes `id`/`name`/`capabilities` — `display_name`
-   * lives in the raw file, so we regex-scan the relevant [models."…"] block.
-   * Returns undefined when the section or key isn't present.
-   */
-  private resolveDisplayName(modelId: string): string | undefined {
+  private async resolveQuestion(
+    sessionId: string,
+    question: KimiPendingQuestion,
+    answers: Record<string, string>,
+  ): Promise<void> {
     try {
-      const toml = readFileSync(KimiPaths.config, 'utf-8');
-      // Split on section headers at line start; each piece begins with the
-      // section name (e.g. `models."kimi-code/kimi-for-coding"]`) followed by
-      // the section body. This avoids confusing `[` in array values with
-      // section boundaries.
-      const sections = toml.split(/^\[/m);
-      for (const section of sections) {
-        // Match either [models."id"] or [models."prefix/id"]
-        const headerMatch = section.match(/^models\."([^"]+)"\]/);
-        if (!headerMatch) continue;
-        const sectionId = headerMatch[1];
-        const shortId = sectionId.includes('/')
-          ? sectionId.slice(sectionId.lastIndexOf('/') + 1)
-          : sectionId;
-        if (sectionId !== modelId && shortId !== modelId) continue;
-        const displayName = section.match(/^\s*display_name\s*=\s*"([^"]+)"/m);
-        if (displayName) return displayName[1];
-      }
-      return undefined;
-    } catch {
-      return undefined;
+      await this.client.respondQuestion(sessionId, question, answers);
+      this.logger.info({ engine: 'kimi', questionId: question.question_id }, 'Resolved Kimi question from Feishu');
+    } catch (error) {
+      this.logger.warn({ error, engine: 'kimi', questionId: question.question_id }, 'Failed to resolve Kimi question');
     }
   }
 
@@ -252,233 +318,282 @@ export class KimiExecutor {
     apiContext: ApiContext | undefined,
   ): string {
     const sections: string[] = [];
-
     if (outputsDir) {
       sections.push(
-        `## Output Files\nWhen producing output files for the user (images, PDFs, documents, archives, code files, etc.), copy them to: ${outputsDir}\nThe bridge will automatically send files placed there to the user.`,
+        `## Output Files\nWhen producing output files for the user, copy them to: ${outputsDir}\nMetaBot will automatically send files placed there.`,
       );
     }
-
     if (apiContext) {
-      sections.push(
-        `## MetaBot API\nYou are running as bot "${apiContext.botName}" in chat "${apiContext.chatId}".\nUse the /metabot skill for full API documentation (agent bus, scheduling, bot management).`,
-      );
-
-      if (apiContext.groupMembers && apiContext.groupMembers.length > 0) {
-        const others = apiContext.groupMembers.filter((m) => m !== apiContext.botName);
-        const groupId = apiContext.groupId;
-        if (groupId) {
-          sections.push(
-            `## Group Chat\nYou are in a group chat (group: ${groupId}) with these bots: ${others.join(', ')}.\nTo talk to another bot, use: \`mb talk <botName> grouptalk-${groupId}-<botName> "message"\``,
-          );
-        }
+      sections.push(buildMetaBotApiPromptContext(apiContext));
+      if (apiContext.teamContext) sections.push(apiContext.teamContext);
+      if (apiContext.groupMembers?.length) {
+        const peers = apiContext.groupMembers.filter((name) => name !== apiContext.botName);
+        if (peers.length) sections.push(`## Agent Organization\nOther Agents in this group: ${peers.join(', ')}.`);
       }
     }
-
-    if (sections.length === 0) return prompt;
-    return `${prompt}\n\n---\n\n${sections.join('\n\n')}`;
+    return sections.length > 0 ? `${prompt}\n\n---\n\n${sections.join('\n\n')}` : prompt;
   }
 }
 
-// --- Kimi → Claude event translation ---
-
-interface TurnState {
-  sessionId: string;
-  accumulatedText: string;
-  /** Kimi streams tool arguments across ToolCall + ToolCallPart events. */
-  openToolCalls: Map<string, { name: string; argsBuffer: string }>;
-  startTime: number;
-  /** Model ID used by the Kimi session (surfaced to the card's stats footer). */
-  model: string;
-  /** Context window size (tokens) — used when emitting modelUsage. */
-  contextWindow: number;
-  /** Last seen StatusUpdate token breakdown (summed into totalTokens). */
-  lastInputTokens?: number;
-  lastOutputTokens?: number;
-}
-
-function translateEvent(event: StreamEvent, state: TurnState, logger: Logger): SDKMessage[] {
-  // ParseError and WireRequest types are not AsyncIterable events we expect
-  // to process here with the current set of capabilities; log and skip.
-  if (event.type === 'error') {
-    logger.warn({ event }, 'Kimi emitted ParseError — skipping');
-    return [];
-  }
-
-  switch (event.type) {
-    case 'TurnBegin':
-    case 'StepBegin':
-    case 'StepInterrupted':
-    case 'CompactionBegin':
-    case 'CompactionEnd':
-    case 'HookTriggered':
-    case 'HookResolved':
-    case 'SteerInput':
-    case 'ApprovalResponse':
-      // Lifecycle events with no direct CardState equivalent; skip.
-      return [];
-
-    case 'ContentPart': {
-      const part = event.payload as { type: string; text?: string };
-      if (part.type === 'text' && part.text) {
-        state.accumulatedText += part.text;
-        // Emit a streaming text_delta so StreamProcessor appends it live.
-        return [{
+function translateSnapshot(snapshot: KimiSessionSnapshot, state: KimiTurnState): SDKMessage[] {
+  const messages: SDKMessage[] = [];
+  const currentMessages = snapshot.messages.items.filter((message) => !state.baselineMessageIds.has(message.id));
+  const fullText = collectAssistantText(currentMessages, snapshot.in_flight_turn?.assistant_text);
+  if (fullText !== state.emittedText) {
+    if (fullText.startsWith(state.emittedText)) {
+      const delta = fullText.slice(state.emittedText.length);
+      if (delta) {
+        messages.push({
           type: 'stream_event',
           session_id: state.sessionId,
-          event: {
-            type: 'content_block_delta',
-            delta: { type: 'text_delta', text: part.text },
-          },
-        }];
+          event: { type: 'content_block_delta', delta: { type: 'text_delta', text: delta } },
+        });
       }
-      // Thinking, images, audio, video — no rendering in the current card.
-      return [];
+    } else {
+      messages.push({
+        type: 'assistant',
+        session_id: state.sessionId,
+        message: { content: [{ type: 'text', text: fullText }] },
+      });
     }
+    state.emittedText = fullText;
+  }
 
-    case 'ToolCall': {
-      const call = event.payload;
-      const name = call.function.name;
-      const args = call.function.arguments ?? '';
-      state.openToolCalls.set(call.id, { name, argsBuffer: args });
-      const input = safeParseJson(args);
-      return [{
+  const tools = collectTools(currentMessages, snapshot);
+  for (const [id, tool] of tools) {
+    const signature = stableValue(tool.input);
+    if (state.toolInputs.get(id) !== signature) {
+      state.toolInputs.set(id, signature);
+      messages.push({
         type: 'assistant',
         session_id: state.sessionId,
         message: {
-          content: [{ type: 'tool_use', id: call.id, name, input }],
+          content: [{ type: 'tool_use', id, name: normalizeKimiToolName(tool.name), input: tool.input ?? {} }],
         },
-      }];
+      });
     }
-
-    case 'ToolCallPart':
-      // Streaming argument chunks. We already emitted the tool_use block on
-      // ToolCall; StreamProcessor just needs the name to update the card.
-      // Skip per-chunk emission to avoid duplicate card entries.
-      return [];
-
-    case 'ToolResult': {
-      const tr = event.payload;
-      state.openToolCalls.delete(tr.tool_call_id);
-      const output = typeof tr.return_value.output === 'string'
-        ? tr.return_value.output
-        : JSON.stringify(tr.return_value.output);
-      return [{
+    if (tool.completed && !state.completedTools.has(id)) {
+      state.completedTools.add(id);
+      messages.push({
         type: 'user',
         session_id: state.sessionId,
-        message: {
-          content: [{ type: 'tool_result', id: tr.tool_call_id, text: output }],
-        },
-      }];
+        message: { content: [{ type: 'tool_result', id, text: formatToolOutput(tool.output) }] },
+      });
     }
+  }
 
-    case 'StatusUpdate': {
-      // Kimi emits cumulative token usage and context usage on each step.
-      // We cache the latest values so the result message can report them as
-      // modelUsage (which the StreamProcessor reads to populate context/model
-      // stats on the Feishu card).
-      const payload = event.payload as {
-        context_usage?: number | null;
-        token_usage?: {
-          input_other: number;
-          output: number;
-          input_cache_read: number;
-          input_cache_creation: number;
-        } | null;
-      };
-      if (payload.token_usage) {
-        state.lastInputTokens = payload.token_usage.input_other
-          + payload.token_usage.input_cache_read
-          + payload.token_usage.input_cache_creation;
-        state.lastOutputTokens = payload.token_usage.output;
-      } else if (typeof payload.context_usage === 'number') {
-        // Fallback: only a single cumulative number is available.
-        state.lastInputTokens = payload.context_usage;
-        state.lastOutputTokens = 0;
-      }
-      return [];
-    }
-
-    case 'SubagentEvent': {
-      // Flatten nested subagent events — StreamProcessor already filters
-      // based on parent_tool_use_id. We pass through a minimal marker.
-      const inner = event.payload.event;
-      const msgs = translateEvent(inner as StreamEvent, state, logger);
-      return msgs.map((m) => ({ ...m, parent_tool_use_id: event.payload.parent_tool_call_id }));
-    }
-
-    case 'TurnEnd':
-      // Emit the final full assistant text block so StreamProcessor's
-      // "full message text replaces accumulated stream text" branch captures
-      // the complete answer text.
-      if (state.accumulatedText) {
-        return [{
-          type: 'assistant',
-          session_id: state.sessionId,
-          message: {
-            content: [{ type: 'text', text: state.accumulatedText }],
+  for (const question of snapshot.pending_questions) {
+    const toolUseId = question.tool_call_id ?? question.question_id;
+    state.pendingQuestions.set(toolUseId, question);
+    if (state.emittedQuestions.has(question.question_id)) continue;
+    state.emittedQuestions.add(question.question_id);
+    messages.push({
+      type: 'assistant',
+      session_id: state.sessionId,
+      message: {
+        content: [
+          {
+            type: 'tool_use',
+            id: toolUseId,
+            name: 'AskUserQuestion',
+            input: {
+              questions: question.questions.map((item) => ({
+                question: item.question,
+                header: item.header ?? '',
+                options: item.options.map((option) => ({
+                  label: option.label,
+                  description: option.description ?? '',
+                })),
+                multiSelect: item.multi_select === true,
+              })),
+            },
           },
-        }];
+        ],
+      },
+    });
+  }
+
+  for (const task of snapshot.subagents ?? []) messages.push(...translateSubagent(task, state));
+  return messages;
+}
+
+function collectAssistantText(messages: KimiWireMessage[], inFlightText?: string): string {
+  const durable = messages
+    .filter((message) => message.role === 'assistant')
+    .flatMap((message) => message.content)
+    .flatMap((content) => (content.type === 'text' && typeof content.text === 'string' ? [content.text] : []))
+    .join('');
+  return durable + (inFlightText ?? '');
+}
+
+function collectTools(
+  messages: KimiWireMessage[],
+  snapshot: KimiSessionSnapshot,
+): Map<string, { name: string; input?: unknown; output?: unknown; completed: boolean }> {
+  const tools = new Map<string, { name: string; input?: unknown; output?: unknown; completed: boolean }>();
+  for (const message of messages) {
+    for (const content of message.content) {
+      if (content.type === 'tool_use' && typeof content.tool_call_id === 'string') {
+        tools.set(content.tool_call_id, {
+          name: typeof content.tool_name === 'string' ? content.tool_name : 'Tool',
+          input: content.input,
+          completed: false,
+        });
+      } else if (content.type === 'tool_result' && typeof content.tool_call_id === 'string') {
+        const previous = tools.get(content.tool_call_id);
+        tools.set(content.tool_call_id, {
+          name: previous?.name ?? 'Tool',
+          input: previous?.input,
+          output: content.output,
+          completed: true,
+        });
       }
-      return [];
+    }
+  }
+  for (const tool of snapshot.in_flight_turn?.running_tools ?? []) {
+    const previous = tools.get(tool.tool_call_id);
+    tools.set(tool.tool_call_id, {
+      name: tool.name,
+      input: tool.args ?? previous?.input,
+      output: previous?.output,
+      completed: previous?.completed ?? false,
+    });
+  }
+  return tools;
+}
 
-    // WireRequest types that arrive in the iterator
-    case 'ApprovalRequest':
-      logger.info({ requestId: (event.payload as any).request_id }, 'Kimi ApprovalRequest — yoloMode should have allowed this');
-      return [];
-    case 'ToolCallRequest':
-    case 'QuestionRequest':
-    case 'HookRequest':
-      logger.info({ type: event.type }, 'Kimi wire request — not yet handled');
-      return [];
+function translateSubagent(task: KimiSubagentTask, state: KimiTurnState): SDKMessage[] {
+  const signature = `${task.status}:${task.subagent_phase ?? ''}:${task.output_preview ?? ''}`;
+  if (state.subagentStates.get(task.id) === signature) return [];
+  const previous = state.subagentStates.get(task.id);
+  state.subagentStates.set(task.id, signature);
+  const terminal = task.status === 'completed' || task.status === 'failed' || task.status === 'cancelled';
+  return [
+    {
+      type: 'system',
+      subtype: terminal ? 'task_notification' : previous ? 'task_progress' : 'task_started',
+      session_id: state.sessionId,
+      task_id: task.id,
+      description: task.description || task.subagent_type || 'Kimi subagent',
+      status: terminal ? (task.status === 'completed' ? 'completed' : 'failed') : 'running',
+      summary: task.output_preview,
+    } as SDKMessage,
+  ];
+}
 
-    default:
-      return [];
+function buildResult(state: KimiTurnState, status: KimiSessionStatus | undefined, aborted: boolean): SDKMessage {
+  const snapshot = state.lastSnapshot;
+  const failed = snapshot?.session.last_turn_reason === 'failed';
+  const cancelled = aborted || snapshot?.session.last_turn_reason === 'cancelled';
+  // Kimi's durable session usage can lag the just-completed turn by one
+  // snapshot. The live status endpoint is authoritative for current context.
+  const usage = snapshot?.session.usage;
+  const outputTokens = usage?.output_tokens ?? 0;
+  const inputTokens =
+    usage?.input_tokens ?? Math.max(0, (status?.context_tokens || usage?.context_tokens || 0) - outputTokens);
+  return {
+    type: 'result',
+    subtype: cancelled ? 'error_cancelled' : failed ? 'error_during_execution' : 'success',
+    session_id: state.sessionId,
+    duration_ms: Date.now() - state.startTime,
+    result: state.emittedText,
+    is_error: failed || cancelled,
+    num_turns: snapshot?.session.usage?.turn_count,
+    modelUsage: {
+      [state.model]: {
+        contextWindow: status?.max_context_tokens || state.contextWindow,
+        inputTokens,
+        outputTokens,
+        costUSD: snapshot?.session.usage?.total_cost_usd ?? 0,
+      },
+    },
+    ...(failed ? { errors: ['Kimi Code turn failed'] } : {}),
+    ...(cancelled ? { errors: ['Aborted by user'] } : {}),
+  };
+}
+
+function localResult(sessionId: string, state: KimiTurnState, text: string): SDKMessage {
+  state.emittedText = text;
+  return {
+    type: 'result',
+    subtype: 'success',
+    session_id: sessionId,
+    duration_ms: Date.now() - state.startTime,
+    result: text,
+    is_error: false,
+    modelUsage: {
+      [state.model]: { contextWindow: state.contextWindow, inputTokens: 0, outputTokens: 0, costUSD: 0 },
+    },
+  };
+}
+
+function parseGoalCommand(
+  prompt: string,
+):
+  | { kind: 'none' }
+  | { kind: 'start'; objective: string }
+  | { kind: 'control'; action: 'pause' | 'resume' | 'cancel' }
+  | { kind: 'status' } {
+  const match = prompt.trim().match(/^\/goal(?:\s+(.*))?$/i);
+  if (!match) return { kind: 'none' };
+  const value = match[1]?.trim() ?? '';
+  if (!value || value.toLowerCase() === 'status') return { kind: 'status' };
+  const normalized = value.toLowerCase();
+  if (normalized === 'pause') return { kind: 'control', action: 'pause' };
+  if (normalized === 'resume') return { kind: 'control', action: 'resume' };
+  if (['clear', 'stop', 'off', 'reset', 'none', 'cancel'].includes(normalized)) {
+    return { kind: 'control', action: 'cancel' };
+  }
+  return { kind: 'start', objective: value };
+}
+
+function formatGoalStatus(goal: Record<string, unknown>): string {
+  const objective = typeof goal.objective === 'string' ? goal.objective : 'Kimi goal';
+  const status = typeof goal.status === 'string' ? goal.status : 'active';
+  const turns = typeof goal.turnsUsed === 'number' ? ` · ${goal.turnsUsed} turns` : '';
+  return `Goal ${status}: ${objective}${turns}`;
+}
+
+function normalizeKimiToolName(name: string): string {
+  const clean = name.replace(/_\d+$/, '');
+  const names: Record<string, string> = {
+    ReadFile: 'Read',
+    WriteFile: 'Write',
+    StrReplaceFile: 'Edit',
+    ReplaceFile: 'Edit',
+    Shell: 'Bash',
+    RunShellCommand: 'Bash',
+    FindFiles: 'Glob',
+    SearchFiles: 'Grep',
+    SearchWeb: 'WebSearch',
+    FetchURL: 'WebFetch',
+  };
+  return names[clean] ?? clean;
+}
+
+function stableValue(value: unknown): string {
+  try {
+    return JSON.stringify(value ?? {});
+  } catch {
+    return String(value);
   }
 }
 
-function buildResultMessage(result: RunResult, state: TurnState): SDKMessage {
-  const isError = result.status !== 'finished';
-  const subtype = result.status === 'finished'
-    ? 'success'
-    : result.status === 'cancelled'
-      ? 'error_cancelled'
-      : 'error_max_steps';
-
-  // Mimic Claude's `modelUsage` shape so StreamProcessor can extract model,
-  // contextWindow, and totalTokens without any engine-specific branching.
-  // Kimi runs on a subscription — leave costUSD at 0 (the card omits $0).
-  const inputTokens = state.lastInputTokens ?? 0;
-  const outputTokens = state.lastOutputTokens ?? 0;
-  const modelUsage: Record<string, {
-    contextWindow: number;
-    inputTokens: number;
-    outputTokens: number;
-    costUSD: number;
-  }> = {
-    [state.model]: {
-      contextWindow: state.contextWindow,
-      inputTokens,
-      outputTokens,
-      costUSD: 0,
-    },
-  };
-
-  return {
-    type: 'result',
-    subtype,
-    session_id: state.sessionId,
-    duration_ms: Date.now() - state.startTime,
-    result: state.accumulatedText,
-    is_error: isError,
-    num_turns: result.steps,
-    modelUsage,
-    // Cost is unknown for Kimi (subscription model, no per-call price emitted).
-    // Leave total_cost_usd undefined — the card will omit the cost line.
-  };
+function formatToolOutput(value: unknown): string {
+  if (typeof value === 'string') return value;
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value ?? '');
+  }
 }
 
-function safeParseJson(s: string): unknown {
-  if (!s) return {};
-  try { return JSON.parse(s); } catch { return { _raw: s }; }
+function abortError(): Error {
+  const error = new Error('Aborted by user');
+  error.name = 'AbortError';
+  return error;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

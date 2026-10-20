@@ -16,43 +16,17 @@
  *   - tag: 'code' / 'code_block': 400 error
  *   - tag: 'note': deprecated in v2
  */
-function buildCtxBar(pct: number): string {
-  const filled = Math.min(Math.round(pct / 10), 10);
-  const color = pct > 80 ? '🟥' : pct >= 50 ? '🟧' : '🟩';
-  return color.repeat(filled) + '⬜'.repeat(10 - filled);
-}
-
-import type { CardState, CardStatus } from '../types.js';
+import type { CardState } from '../types.js';
 import { parseMarkdownToBlocks, type Block } from './markdown-parser.js';
+import {
+  STATUS_CONFIG,
+  BG_ICON,
+  truncate,
+  truncateContent,
+} from './card-builder-utils.js';
 
-const STATUS_CONFIG: Record<CardStatus, { color: string; title: string; icon: string }> = {
-  thinking:           { color: 'blue',   title: 'Thinking...',       icon: '🔵' },
-  running:            { color: 'blue',   title: 'Running...',        icon: '🔵' },
-  complete:           { color: 'green',  title: 'Complete',          icon: '🟢' },
-  error:              { color: 'red',    title: 'Error',             icon: '🔴' },
-  waiting_for_input:  { color: 'yellow', title: 'Waiting for Input', icon: '🟡' },
-};
-
-const BG_ICON: Record<'running' | 'completed' | 'failed' | 'stopped', string> = {
-  running:   '⏳',
-  completed: '✅',
-  failed:    '❌',
-  stopped:   '⏹️',
-};
-
-const MAX_CONTENT_LENGTH = 28000;
-const FOOTER_FONT_SIZE   = 2;
-
-function truncate(text: string, max: number): string {
-  if (text.length <= max) return text;
-  return text.slice(0, max) + '…';
-}
-
-function truncateContent(text: string): string {
-  if (text.length <= MAX_CONTENT_LENGTH) return text;
-  const half = Math.floor(MAX_CONTENT_LENGTH / 2) - 50;
-  return text.slice(0, half) + '\n\n... (content truncated) ...\n\n' + text.slice(-half);
-}
+// v2-only constant: font size used in the grey stats footer panel.
+const FOOTER_FONT_SIZE = 2;
 
 function blockToElement(block: Block): unknown {
   switch (block.type) {
@@ -66,10 +40,15 @@ function blockToElement(block: Block): unknown {
       };
 
     case 'table': {
+      // data_type 'lark_md' (Feishu 7.10+) so `**bold**`, links, and other
+      // inline markdown inside header/cell text actually render. With
+      // 'text' the `**` syntax leaks through as literal asterisks because
+      // text columns do not parse markdown — that's why mobile table
+      // headers were rendering `**品类**` verbatim.
       const columns = block.headers.map((h, i) => ({
         name:             `col${i}`,
         display_name:     h,
-        data_type:        'text',
+        data_type:        'lark_md',
         horizontal_align: block.align[i] ?? 'left',
         vertical_align:   'center',
         width:            'auto',
@@ -123,34 +102,83 @@ export function buildCardV2(state: CardState): string {
   const config   = STATUS_CONFIG[state.status];
   const elements: unknown[] = [];
 
-  // Tool calls section
-  if (state.toolCalls.length > 0) {
-    const isFinal = state.status === 'complete' || state.status === 'error';
-    if (isFinal) {
-      // Final card: show only a one-line summary
-      const counts = new Map<string, number>();
-      for (const t of state.toolCalls) counts.set(t.name, (counts.get(t.name) ?? 0) + 1);
-      const parts = Array.from(counts.entries())
-        .sort((a, b) => b[1] - a[1])
-        .map(([name, count]) => `${name}×${count}`);
-      const summary = `✅ **${state.toolCalls.length} tools** (${parts.join(', ')})`;
-      elements.push({
-        tag:     'markdown',
-        content: summary,
-      });
-      elements.push({ tag: 'hr' });
-    } else {
-      // Streaming: show individual tool calls with status
-      const toolLines = state.toolCalls.map((t) => {
-        const icon = t.status === 'running' ? '⏳' : '✅';
-        return `${icon} **${t.name}** ${t.detail}`;
-      });
-      elements.push({
-        tag:     'markdown',
-        content: toolLines.join('\n'),
-      });
-      elements.push({ tag: 'hr' });
+  // Goal badge — pinned at the top so users see at a glance that the session
+  // is in goal-driven mode (Claude /goal). Persists across turns until /goal
+  // clear or /reset. Mirrors v1 builder; do not remove without restoring
+  // equivalent rendering or the /goal feature becomes invisible.
+  if (state.goalCondition) {
+    elements.push({
+      tag:     'markdown',
+      content: `🎯 **Goal:** ${truncate(state.goalCondition, 200)}`,
+    });
+    elements.push({ tag: 'hr' });
+  }
+
+  // Agent Teams panel — teammates + shared task list. Driven by Claude
+  // Code's TaskCreated / TaskCompleted / TeammateIdle hooks. Mirrors v1
+  // builder; removing this hides the entire Agent Teams UI from users.
+  if (state.teamState && (state.teamState.teammates.length > 0 || state.teamState.tasks.length > 0)) {
+    const ts    = state.teamState;
+    const lines: string[] = [];
+    const header = ts.name ? `🧑‍🤝‍🧑 **Team:** \`${ts.name}\`` : '🧑‍🤝‍🧑 **Team**';
+    lines.push(header);
+    if (ts.teammates.length > 0) {
+      lines.push('');
+      lines.push('**Teammates:**');
+      for (const m of ts.teammates) {
+        const icon = m.status === 'working' ? '⏳' : '💤';
+        const subj = m.lastSubject ? ` — _${truncate(m.lastSubject, 60)}_` : '';
+        lines.push(`${icon} \`${m.name}\` (${m.status})${subj}`);
+      }
     }
+    if (ts.tasks.length > 0) {
+      // Show in-progress first, then the most recent completions
+      const pending    = ts.tasks.filter((t) => t.status === 'pending');
+      const inProgress = ts.tasks.filter((t) => t.status === 'in_progress');
+      const completed  = ts.tasks.filter((t) => t.status === 'completed').slice(-5);
+      lines.push('');
+      lines.push(`**Tasks:** ${pending.length} pending · ${inProgress.length} in progress · ${ts.tasks.filter((t) => t.status === 'completed').length} done`);
+      for (const t of pending) {
+        const owner = t.teammate ? ` → \`${t.teammate}\`` : '';
+        lines.push(`◻️ ${truncate(t.subject, 80)}${owner}`);
+      }
+      for (const t of inProgress) {
+        const owner = t.teammate ? ` → \`${t.teammate}\`` : '';
+        lines.push(`⏳ ${truncate(t.subject, 80)}${owner}`);
+      }
+      for (const t of completed) {
+        const owner = t.teammate ? ` (\`${t.teammate}\`)` : '';
+        lines.push(`✅ ${truncate(t.subject, 80)}${owner}`);
+      }
+    }
+    elements.push({ tag: 'markdown', content: lines.join('\n') });
+    elements.push({ tag: 'hr' });
+  }
+
+  // Tool calls indicator — single line, no per-tool list.
+  // Users repeatedly told us the running tool list is noise; they only care
+  // about the final answer. We still show ONE line while the turn is in
+  // flight so a hung run is visibly hung instead of looking like a frozen
+  // card, but we hide the section completely once the turn is complete/
+  // errored. Web UI keeps its own collapsible per-tool view (see
+  // packages/web-ui/src/routes/chat.tsx); this only affects the
+  // Feishu surface.
+  // Keep the summary on an empty successful turn. Hiding it on every
+  // completed card assumes a final response body exists; tool-only turns
+  // would otherwise render as a blank "Complete" card with only the footer.
+  if (
+    state.toolCalls.length > 0 &&
+    state.status !== 'error' &&
+    (state.status !== 'complete' || !state.responseText.trim())
+  ) {
+    const last  = state.toolCalls[state.toolCalls.length - 1];
+    const icon  = last.status === 'running' ? '⏳' : '✅';
+    const total = state.toolCalls.length;
+    elements.push({
+      tag:     'markdown',
+      content: `${icon} **${last.name}** · ${total} tool${total > 1 ? 's' : ''}`,
+    });
+    elements.push({ tag: 'hr' });
   }
 
   // Background tasks (Monitor, etc.)
@@ -179,41 +207,64 @@ export function buildCardV2(state: CardState): string {
     });
   }
 
-  // Pending question section — interactive buttons + text-fallback hint
   if (state.pendingQuestion) {
     elements.push({ tag: 'hr' });
+    const picked = state.pendingQuestion.selected ?? [];
     state.pendingQuestion.questions.forEach((q, qi) => {
       const descLines = q.options.map(
         (opt, i) => `**${i + 1}.** ${opt.label} — _${opt.description}_`,
       );
       elements.push({
         tag:     'markdown',
-        content: [`**[${q.header}] ${q.question}**`, '', ...descLines].join('\n'),
+        content: [
+          `**[${q.header}] ${q.question}**${q.multiSelect ? ' （可多选，选好后点「提交选择」）' : ''}`,
+          '',
+          ...descLines,
+        ].join('\n'),
       });
-      const actions = q.options.map((opt, oi) => ({
-        tag:  'button',
-        text: { tag: 'plain_text', content: `${oi + 1}. ${opt.label}` },
-        type: 'primary',
-        // Card Schema 2.0 requires button callbacks via `behaviors`. The v1
-        // top-level `value` field is silently dropped under schema 2.0, so the
-        // click never reaches the `card.action.trigger` handler.
-        behaviors: [
-          {
-            type:  'callback',
-            value: {
-              action:        'answer_question',
-              toolUseId:     state.pendingQuestion!.toolUseId,
-              questionIndex: qi,
-              optionIndex:   oi,
-            },
-          },
-        ],
-      }));
-      elements.push({ tag: 'action', actions });
+      // Schema 2.0 has no `action` container (it makes the whole card invalid —
+      // see the header note), so each option becomes a top-level `button`
+      // element. Callbacks must travel through `behaviors`; the v1 top-level
+      // `value` field is silently dropped under schema 2.0.
+      //
+      // Multi-select can't be expressed by a single click, so option buttons
+      // only toggle their own state (`toggle_option`) and a separate
+      // `submit_question` button commits the set. Submit is disabled while
+      // nothing is picked, so a click can never resolve the question by accident.
+      const cb = (action: string, optionIndex: number | undefined) => ({
+        type: 'callback',
+        value: {
+          action,
+          toolUseId:     state.pendingQuestion!.toolUseId,
+          questionIndex: qi,
+          ...(optionIndex === undefined ? {} : { optionIndex }),
+        },
+      });
+      q.options.forEach((opt, oi) => {
+        const on = q.multiSelect && picked.includes(opt.label);
+        elements.push({
+          tag:  'button',
+          text: { tag: 'plain_text', content: `${on ? '✓ ' : ''}${oi + 1}. ${truncate(opt.label, 24)}` },
+          type: (!q.multiSelect && oi === 0) || on ? 'primary' : 'default',
+          behaviors: [cb(q.multiSelect ? 'toggle_option' : 'answer_question', oi)],
+        });
+      });
+      if (q.multiSelect) {
+        elements.push({
+          tag:      'button',
+          text:     { tag: 'plain_text', content: `✅ 提交选择${picked.length ? `（${picked.length}）` : ''}` },
+          type:     'primary',
+          disabled: picked.length === 0,
+          behaviors: [cb('submit_question', undefined)],
+        });
+      }
     });
+    const multi = state.pendingQuestion.questions.some((q) => q.multiSelect);
     elements.push({
       tag:     'markdown',
-      content: '_点击按钮选择，或直接输入自定义答案_',
+      content: multi
+        ? '_多选题：点击多个选项后按「提交选择」；也可直接输入编号组合（如 `1,3`）或自定义答案。单选题点击按钮即作答。_'
+        : '_点击按钮选择；也可请回复数字（1/2/…）或直接输入自定义答案_',
     });
   }
 
@@ -227,29 +278,23 @@ export function buildCardV2(state: CardState): string {
 
   // Stats footer — grey background panel
   {
-
-    // Context usage + cost/model/duration — single footer line
-    const footerParts: string[] = [];
+    const parts: string[] = [];
     if (state.totalTokens && state.contextWindow) {
       const pct    = Math.round((state.totalTokens / state.contextWindow) * 100);
       const tokensK = state.totalTokens >= 1000
         ? `${(state.totalTokens / 1000).toFixed(1)}k`
         : `${state.totalTokens}`;
       const ctxK = `${Math.round(state.contextWindow / 1000)}k`;
-      const bar = buildCtxBar(pct);
-      footerParts.push(`ctx ${tokensK}/${ctxK} (${pct}%) ${bar}`);
+      const color = pct >= 80 ? '🟥' : pct >= 50 ? '🟧' : '🟩';
+      const filled = Math.max(0, Math.min(10, Math.round(pct / 10)));
+      parts.push(`${color} ${'▰'.repeat(filled)}${'▱'.repeat(10 - filled)} ctx: ${tokensK}/${ctxK} (${pct}%)`);
     }
-
-    // Cost, model, duration — subtle grey (only on complete/error)
     if (state.status === 'complete' || state.status === 'error') {
-      const parts: string[] = [];
       if (state.sessionCostUsd != null) parts.push(`$${state.sessionCostUsd.toFixed(2)}`);
       if (state.model) parts.push(state.model.replace(/^claude-/, ''));
       if (state.durationMs !== undefined) parts.push(`${(state.durationMs / 1000).toFixed(1)}s`);
-      if (parts.length > 0) footerParts.push(parts.join(' | '));
     }
-
-    if (footerParts.length > 0) {
+    if (parts.length > 0) {
       elements.push({
         tag:               'column_set',
         background_style:  'grey',
@@ -265,7 +310,7 @@ export function buildCardV2(state: CardState): string {
             elements: [
               {
                 tag:        'markdown',
-                content:    footerParts.join(' | '),
+                content:    `<font color="grey" size="${FOOTER_FONT_SIZE}">_${parts.join(' | ')}_</font>`,
                 text_align: 'right',
               },
             ],

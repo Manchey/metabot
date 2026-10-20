@@ -12,9 +12,14 @@ Sessions expire after **24 hours** of inactivity.
 
 ## Group Chat Behavior
 
-- **Group chats** — Bot only responds when **@mentioned**
-- **2-member groups** (1 user + 1 bot) — Treated like DMs, no @mention required
+- **Multi-member groups** — Default to `mention`; only an exact @mention of the current bot triggers it
+- **2-member groups** (1 user + 1 bot) — Default to `all` and behave like DMs
 - **DMs** — Bot replies to all messages
+
+The group owner can set `@Bot /group-reply mention` or
+`@Bot /group-reply all`. The explicit mode is isolated and persisted per bot
+and `chatId`, and overrides both `groupNoMention` and the 2-member-group
+default. See [Chat Commands](../usage/chat-commands.md#group-reply-modes).
 
 The member count is cached for 5 minutes to avoid excessive API calls.
 
@@ -30,8 +35,9 @@ This is useful when you need to work on multiple tasks simultaneously with the s
 
 ## Bot Isolation
 
-When running multiple bots (via `bots.json`), sessions are fully isolated between bots. Each bot:
+When running multiple bots (via `bots.json`), sessions and group reply modes are fully isolated between bots. Each bot:
 
 - Has its own Feishu/Telegram app and receives only its own messages
 - Maintains its own session store
+- Maintains its own persisted reply mode for each group
 - Uses its own working directory and configuration

@@ -33,6 +33,8 @@ export class StreamProcessor {
   private _pendingQuestions: PendingQuestion[] = [];
   private _sdkHandledTools: DetectedTool[] = [];
   private _planFilePath: string | null = null;
+  /** Plan markdown captured directly from the ExitPlanMode tool_use input. */
+  private _planContent: string | null = null;
   private _model: string | undefined;
   private _totalTokens: number | undefined;
   private _contextWindow: number | undefined;
@@ -40,6 +42,9 @@ export class StreamProcessor {
   private _lastInputTokens: number | undefined;
   // Live background tasks (Monitor, etc.) — task_id → latest rollup.
   private _backgroundEvents: Map<string, BackgroundEvent> = new Map();
+  // Kimi/Codex snapshot adapters may repeat the same native tool id while it
+  // is running. Update that row instead of appending duplicate card entries.
+  private _nativeToolIndexes: Map<string, number> = new Map();
 
   constructor(private userPrompt: string) {}
 
@@ -178,13 +183,25 @@ export class StreamProcessor {
           this.responseText = block.text;
         }
       } else if (block.type === 'tool_use' && block.name) {
-        this.addToolCall(block.name, block.input);
+        const existingIndex = block.id ? this._nativeToolIndexes.get(block.id) : undefined;
+        if (existingIndex !== undefined) {
+          this.updateToolCall(existingIndex, block.name, block.input);
+        } else {
+          const index = this.addToolCall(block.name, block.input);
+          if (block.id) this._nativeToolIndexes.set(block.id, index);
+        }
         // Detect interactive tools at top level
         if (message.parent_tool_use_id === null || message.parent_tool_use_id === undefined) {
           if (block.name === 'AskUserQuestion' && block.id && block.input) {
             this.extractPendingQuestion(block.id, block.input);
           } else if (SDK_HANDLED_TOOLS.has(block.name) && block.id) {
             this._sdkHandledTools.push({ toolUseId: block.id, name: block.name });
+            // Capture the plan markdown straight from the tool input so the
+            // bridge can show it even when the agent didn't Write a plan file.
+            if (block.name === 'ExitPlanMode') {
+              const plan = (block.input as { plan?: unknown } | undefined)?.plan;
+              if (typeof plan === 'string' && plan.trim()) this._planContent = plan;
+            }
           }
         }
       } else if (block.type === 'tool_result') {
@@ -301,13 +318,14 @@ export class StreamProcessor {
     };
   }
 
-  private addToolCall(name: string, input: unknown): void {
+  private addToolCall(name: string, input: unknown): number {
     // Complete previous tool
     this.completeCurrentTool();
 
     this.currentToolName = name;
     const detail = formatToolDetail(name, input);
     this.toolCalls.push({ name, detail, status: 'running' });
+    const index = this.toolCalls.length - 1;
 
     // Track image file paths and plan file paths from Write tool
     if (name === 'Write' && input && typeof input === 'object') {
@@ -319,6 +337,15 @@ export class StreamProcessor {
         this._planFilePath = filePath;
       }
     }
+    return index;
+  }
+
+  private updateToolCall(index: number, name: string, input: unknown): void {
+    const tool = this.toolCalls[index];
+    if (!tool) return;
+    tool.name = name;
+    const detail = formatToolDetail(name, input);
+    if (detail) tool.detail = detail;
   }
 
   private completeCurrentTool(): void {
@@ -412,6 +439,11 @@ export class StreamProcessor {
   getPlanFilePath(): string | null {
     return this._planFilePath;
   }
+
+  /** Plan markdown from the ExitPlanMode tool input, if present. */
+  getPlanContent(): string | null {
+    return this._planContent;
+  }
 }
 
 function isImagePath(filePath: string): boolean {
@@ -433,13 +465,13 @@ function formatToolDetail(name: string, input: unknown): string {
 
   switch (name) {
     case 'Read':
-      return inp.file_path ? `\`${shortenPath(inp.file_path as string)}\`` : '';
+      return inp.file_path || inp.path ? `\`${shortenPath(String(inp.file_path ?? inp.path))}\`` : '';
     case 'Write':
-      return inp.file_path ? `\`${shortenPath(inp.file_path as string)}\`` : '';
+      return inp.file_path || inp.path ? `\`${shortenPath(String(inp.file_path ?? inp.path))}\`` : '';
     case 'Edit':
-      return inp.file_path ? `\`${shortenPath(inp.file_path as string)}\`` : '';
+      return inp.file_path || inp.path ? `\`${shortenPath(String(inp.file_path ?? inp.path))}\`` : '';
     case 'Bash':
-      return inp.command ? `\`${truncate(inp.command as string, 60)}\`` : '';
+      return inp.command || inp.cmd ? `\`${truncate(String(inp.command ?? inp.cmd), 60)}\`` : '';
     case 'Glob':
       return inp.pattern ? `\`${inp.pattern}\`` : '';
     case 'Grep':
