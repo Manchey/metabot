@@ -67,3 +67,11 @@ not replace them.
   integrations.
 - Treat `lark-cli` and its Skills as user-managed. Mirror selected existing
   Lark Skills without overwriting locally modified copies.
+
+## Local integration branch
+
+This checkout deploys `main-myself`. Start local feature branches from the latest
+`fork/main-myself`, after fetching and checking its ancestry. The local `main`
+and the fork's `main` are separate histories and must not be assumed to contain
+this deployment's features. Integrate completed local features back into
+`main-myself` and preserve its upstream updates before deploying.
