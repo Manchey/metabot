@@ -9,7 +9,9 @@ Retained local behavior:
 
 - Every initial Feishu message starts an independent topic. Replies, commands,
   cards, files and scheduled work keep their topic destination. Existing topics
-  continue to use their original root message.
+  continue to use their original root message. Legacy `oc_...:om_...` keys
+  migrate automatically, preserving engine ownership, accounting and newer
+  canonical records. Switching engines still starts a new native engine session.
 - `/ps [3h|7d|30m]` reports activity and running tasks.
 - `@Bot /noMention [on|off|status]` aliases the persistent `/group-reply` setting.
   Current upstream ownership checks and per-Agent group scope apply.

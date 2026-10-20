@@ -4,6 +4,7 @@ import * as os from 'node:os';
 import type { Logger } from '../../utils/logger.js';
 import type { EngineName } from '../types.js';
 import type { CodexReasoningEffort } from '../../config.js';
+import { normalizeLegacyFeishuConversationId } from '../../feishu/conversation.js';
 
 export interface UserSession {
   sessionId: string | undefined;
@@ -318,12 +319,18 @@ export class SessionManager {
       const data: Record<string, PersistedSession> = JSON.parse(raw);
       const now = Date.now();
       let loaded = 0;
-      for (const [chatId, persisted] of Object.entries(data)) {
+      let migrated = 0;
+      for (const [storedId, persisted] of Object.entries(data)) {
+        const chatId = normalizeLegacyFeishuConversationId(storedId);
+        const legacy = chatId !== storedId;
+        if (legacy) migrated++;
+        // A newer canonical record wins if both formats exist during an upgrade.
+        if ((this.sessions.get(chatId)?.lastUsed ?? -Infinity) > persisted.lastUsed) continue;
         // Skip expired sessions
         if (now - persisted.lastUsed > SESSION_TTL_MS) continue;
         this.sessions.set(chatId, {
           sessionId: persisted.sessionId || undefined,
-          sessionIdEngine: persisted.sessionIdEngine,
+          sessionIdEngine: persisted.sessionIdEngine ?? (legacy ? persisted.engine ?? 'claude' : undefined),
           threadContextInitialized: persisted.threadContextInitialized,
           workingDirectory: persisted.workingDirectory,
           lastUsed: persisted.lastUsed,
@@ -331,7 +338,7 @@ export class SessionManager {
           cumulativeCostUsd: persisted.cumulativeCostUsd ?? 0,
           cumulativeDurationMs: persisted.cumulativeDurationMs ?? 0,
           model: persisted.model,
-          modelEngine: persisted.modelEngine,
+          modelEngine: persisted.modelEngine ?? (legacy && persisted.model ? persisted.engine ?? 'claude' : undefined),
           reasoningEffort: persisted.reasoningEffort,
           engine: persisted.engine,
           activeGoal: persisted.activeGoal,
@@ -342,7 +349,8 @@ export class SessionManager {
         loaded++;
       }
       if (loaded > 0) {
-        this.logger.info({ loaded, path: this.persistPath }, 'Restored sessions from disk');
+        this.logger.info({ loaded, migrated, path: this.persistPath }, 'Restored sessions from disk');
+        if (migrated > 0) this.saveToDisk();
       }
     } catch (err) {
       this.logger.warn({ err }, 'Failed to load sessions from disk, starting fresh');

@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { normalizeLegacyFeishuConversationId } from '../src/feishu/conversation.js';
 import { SessionManager } from '../src/engines/claude/session-manager.js';
 
 function createLogger() {
@@ -21,6 +22,31 @@ describe('SessionManager', () => {
     if (manager) manager.destroy();
     delete process.env.SESSION_STORE_DIR;
     rmSync(storeDir, { recursive: true, force: true });
+  });
+
+  it('migrates legacy Feishu topic keys and preserves engine ownership and accounting', () => {
+    const legacy = 'oc_chat:om_root';
+    writeFileSync(join(storeDir, 'sessions-default.json'), JSON.stringify({
+      [legacy]: { sessionId: 'old-claude-id', workingDirectory: '/tmp/old-project', lastUsed: Date.now(), cumulativeTokens: 123, model: 'claude-opus-4-6' },
+    }));
+    manager = new SessionManager('/tmp/current', createLogger());
+    const session = manager.getSession(normalizeLegacyFeishuConversationId(legacy));
+    expect(session).toMatchObject({ sessionId: 'old-claude-id', sessionIdEngine: 'claude', modelEngine: 'claude', cumulativeTokens: 123 });
+    manager.destroy();
+    manager = new SessionManager('/tmp/current', createLogger());
+    expect(manager.getSession(normalizeLegacyFeishuConversationId(legacy)).sessionId).toBe('old-claude-id');
+  });
+
+  it('keeps the newer record when legacy and canonical topic keys coexist', () => {
+    const legacy = 'oc_chat:om_root';
+    const canonical = normalizeLegacyFeishuConversationId(legacy);
+    const now = Date.now();
+    writeFileSync(join(storeDir, 'sessions-default.json'), JSON.stringify({
+      [canonical]: { sessionId: 'new-codex-id', sessionIdEngine: 'codex', workingDirectory: '/tmp', lastUsed: now },
+      [legacy]: { sessionId: 'old-claude-id', workingDirectory: '/tmp', lastUsed: now - 1 },
+    }));
+    manager = new SessionManager('/tmp', createLogger());
+    expect(manager.getSession(canonical)).toMatchObject({ sessionId: 'new-codex-id', sessionIdEngine: 'codex' });
   });
 
   it('creates a new session with default working directory', () => {

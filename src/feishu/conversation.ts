@@ -19,3 +19,13 @@ export function parseFeishuConversation(id: string): { chatId: string; rootMessa
   }
   return { chatId: parts[0], rootMessageId: parts[1] };
 }
+
+/** Upgrade topic keys saved by the pre-Personal Edition fork. */
+export function normalizeLegacyFeishuConversationId(id: string): string {
+  const legacy = id.match(/^(oc_[^:]+):(om_[^:]+)$/);
+  if (!legacy) return id;
+  return feishuConversationId({
+    chatId: legacy[1], messageId: legacy[2], rootMessageId: legacy[2],
+    chatType: 'group', userId: '', text: '',
+  });
+}
