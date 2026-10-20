@@ -16,6 +16,8 @@ export interface SessionRecord {
   claudeSessionId?: string;
   workingDirectory: string;
   title: string;
+  titleSource: string;
+  titlePrompt: string;
   platform: string;
   chatId: string;
   createdAt: number;
@@ -94,6 +96,9 @@ export class SessionRegistry {
       );
       CREATE INDEX IF NOT EXISTS idx_session_messages_session_id ON session_messages(session_id);
     `);
+    const columns = this.db.prepare('PRAGMA table_info(sessions)').all() as Array<{ name: string }>;
+    if (!columns.some(c => c.name === 'title_source')) this.db.exec("ALTER TABLE sessions ADD COLUMN title_source TEXT NOT NULL DEFAULT 'legacy'");
+    if (!columns.some(c => c.name === 'title_prompt')) this.db.exec("ALTER TABLE sessions ADD COLUMN title_prompt TEXT NOT NULL DEFAULT ''");
   }
 
   /** Detect platform from chatId pattern. */
@@ -118,6 +123,7 @@ export class SessionRegistry {
     responseText?: string;
     costUsd?: number;
     durationMs?: number;
+    recordMessages?: boolean;
   }): string {
     const { chatId, botName, claudeSessionId, workingDirectory, prompt, responseText, costUsd, durationMs } = opts;
     const platform = SessionRegistry.detectPlatform(chatId);
@@ -166,17 +172,19 @@ export class SessionRegistry {
         this.db
           .prepare(
             `
-          INSERT INTO sessions (id, bot_name, claude_session_id, working_directory, title, platform, chat_id, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          INSERT INTO sessions (id, bot_name, claude_session_id, working_directory, title, platform, chat_id, created_at, updated_at, title_prompt, title_source)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `,
           )
-          .run(id, botName, claudeSessionId || null, workingDirectory, title, platform, chatId, now, now);
+          .run(id, botName, claudeSessionId || null, workingDirectory, title, platform, chatId, now, now, prompt, prompt ? 'fallback' : 'manual');
         session = {
           id,
           botName,
           claudeSessionId,
           workingDirectory,
           title,
+          titleSource: prompt ? 'fallback' : 'manual',
+          titlePrompt: prompt,
           platform,
           chatId,
           createdAt: now,
@@ -186,10 +194,10 @@ export class SessionRegistry {
     }
 
     // Add messages
-    if (prompt) {
+    if (prompt && opts.recordMessages !== false) {
       this.addMessage(session!.id, 'user', prompt, platform);
     }
-    if (responseText) {
+    if (responseText && opts.recordMessages !== false) {
       this.addMessage(session!.id, 'assistant', responseText, platform, costUsd, durationMs);
     }
 
@@ -327,10 +335,27 @@ export class SessionRegistry {
     return session.claudeSessionId;
   }
 
+  /** Preserve the original question independently of transcript trimming. */
+  prepareTitle(id: string): SessionRecord {
+    const session = this.getSession(id)!;
+    if (session.titleSource !== 'legacy') return session;
+    const first = this.db.prepare("SELECT text FROM session_messages WHERE session_id = ? AND role = 'user' ORDER BY id ASC LIMIT 1").get(id) as { text: string } | undefined;
+    const prompt = first?.text || session.title;
+    // A legacy title differing from the original prefix was manually renamed.
+    const source = first && session.title !== prompt.slice(0, 60).replace(/\n/g, ' ') ? 'manual' : 'fallback';
+    this.db.prepare('UPDATE sessions SET title_source = ?, title_prompt = ? WHERE id = ?').run(source, prompt, id);
+    return this.getSession(id)!;
+  }
+
+  setGeneratedTitle(id: string, title: string): void {
+    // A /title or web rename while generation is running always wins.
+    this.db.prepare("UPDATE sessions SET title = ?, title_source = 'generated' WHERE id = ? AND title_source = 'fallback'").run(title, id);
+  }
+
   /** Rename a session. */
   renameSession(id: string, newTitle: string): boolean {
     const result = this.db
-      .prepare('UPDATE sessions SET title = ?, updated_at = ? WHERE id = ?')
+      .prepare("UPDATE sessions SET title = ?, title_source = 'manual', updated_at = ? WHERE id = ?")
       .run(newTitle, Date.now(), id);
     return result.changes > 0;
   }
@@ -354,6 +379,8 @@ export class SessionRegistry {
       claudeSessionId: row.claude_session_id || undefined,
       workingDirectory: row.working_directory,
       title: row.title,
+      titleSource: row.title_source,
+      titlePrompt: row.title_prompt,
       platform: row.platform,
       chatId: row.chat_id,
       createdAt: row.created_at,

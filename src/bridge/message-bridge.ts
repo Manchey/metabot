@@ -50,6 +50,7 @@ import { buildCodexGoalPrompt } from './codex-goal-policy.js';
 import { isContextOverflowError, isStaleSessionError } from './error-classifiers.js';
 import { sendFinalCardWithRetry, sendPlanContent } from './final-delivery.js';
 import { isDefaultMediaText, mergeBatchMessages, mergeBatchWithText, type PendingBatch } from './media-batch.js';
+import { ThreadTitleService } from './thread-title.js';
 import { sendCompletionNotice } from './notification-policy.js';
 import { normalizePromptForEngine } from './prompt-normalizer.js';
 import { SlashPickerController } from './slash-picker-controller.js';
@@ -200,6 +201,7 @@ export class MessageBridge {
   private outputHandler: OutputHandler;
   readonly costTracker: CostTracker;
   private sessionRegistry?: SessionRegistry;
+  private threadTitles?: ThreadTitleService;
   /** Chats that have begun task setup but do not have an ExecutionHandle yet. */
   private startingTasks = new Map<string, StartingTask>();
   private runningTasks = new Map<string, RunningTask>(); // keyed by chatId
@@ -465,6 +467,8 @@ export class MessageBridge {
   /** Inject the session registry for cross-platform session sync. */
   setSessionRegistry(registry: SessionRegistry): void {
     this.sessionRegistry = registry;
+    this.commandHandler.setSessionRegistry(registry);
+    this.threadTitles = new ThreadTitleService(registry, this.config, this.logger);
   }
 
   /** Inject MetaBot Agent Teams store so cards can show team and run state. */
@@ -2210,6 +2214,7 @@ export class MessageBridge {
     const displayPrompt = hasMedia && mediaCount > 1
       ? `🖼️ [${mediaCount} files] ${text}`
       : fileKey ? '📎 ' + text : imageKey ? '🖼️ ' + text : text;
+    this.threadTitles?.start(chatId, displayPrompt, cwd, engineName, session.model);
     const processor = new StreamProcessor(displayPrompt);
     // Capture mirrored goal once at task start. New /goal messages can't
     // arrive mid-task (handleMessage rejects them with "Task In Progress"),
@@ -2652,6 +2657,7 @@ export class MessageBridge {
 
       // Send completion notification for long-running tasks (>10s) so user gets a Feishu push
       await sendCompletionNotice({
+        getTitle: this.threadTitles ? () => this.threadTitles!.get(chatId) : undefined,
         sender: this.sender,
         config: this.config,
         logger: this.logger,
@@ -2721,6 +2727,7 @@ export class MessageBridge {
 
           this.recordSession(chatId, displayPrompt, lastState.responseText, processor.getSessionId(), lastState.costUsd, durationMs);
           await sendCompletionNotice({
+            getTitle: this.threadTitles ? () => this.threadTitles!.get(chatId) : undefined,
             sender: this.sender,
             config: this.config,
             logger: this.logger,

@@ -8,11 +8,16 @@ import type { SessionSummary } from '../engines/claude/session-lister.js';
 import { MemoryClient } from '../memory/memory-client.js';
 import { AuditLogger } from '../utils/audit-logger.js';
 import type { DocSync } from '../sync/doc-sync.js';
+import type { SessionRegistry } from '../session/session-registry.js';
+import { normalizeThreadTitle } from './thread-title.js';
 import type { ActivityStore } from '../api/activity-store.js';
 
 type ReplyNotice = (title: string, content: string, color?: string) => Promise<void>;
 
 export class CommandHandler {
+  private sessionRegistry?: SessionRegistry;
+  setSessionRegistry(registry: SessionRegistry): void { this.sessionRegistry = registry; }
+
   private docSync: DocSync | null = null;
   private activityStore: ActivityStore | null = null;
   getRunningTasksInfo: () => Array<{ chatId: string; userId?: string; startTime: number }> = () => [];
@@ -72,6 +77,32 @@ export class CommandHandler {
     this.audit.log({ event: 'command', botName: this.config.name, chatId, userId, prompt: cmd });
 
     switch (cmd.toLowerCase()) {
+      case '/title': {
+        if (!this.sessionRegistry) {
+          await this.sender.sendText(chatId, '当前服务未启用会话标题存储。');
+          return true;
+        }
+        const raw = text.slice(cmd.length).trim();
+        let session = this.sessionRegistry.findByChatId(chatId);
+        if (!raw) {
+          await this.sender.sendText(chatId, `当前标题：【${normalizeThreadTitle(session?.title || '未命名会话')}】\n使用 /title 新标题 修改当前 thread 的标题。`);
+          return true;
+        }
+        const title = normalizeThreadTitle(raw);
+        if (!title) {
+          await this.sender.sendText(chatId, '请输入有效标题：/title 新标题');
+          return true;
+        }
+        if (!session) {
+          const id = this.sessionRegistry.createOrUpdate({ chatId, botName: this.config.name,
+            workingDirectory: this.sessionManager.getSession(chatId).workingDirectory, prompt: '', recordMessages: false });
+          session = this.sessionRegistry.getSession(id)!;
+        }
+        this.sessionRegistry.renameSession(session.id, title);
+        await this.sender.sendText(chatId, `标题已修改为：【${title}】`);
+        return true;
+      }
+
       case '/ps':
         await this.handlePsCommand(text.slice(3).trim(), (title, content, color) => this.sender.sendTextNotice(chatId, title, content, color));
         return true;
@@ -79,6 +110,7 @@ export class CommandHandler {
       case '/help':
         await this.sender.sendTextNotice(chatId, '📖 Help', [
           '**Bot Commands:**',
+          '`/title [新标题]` - 查看或修改当前 thread 的主题标题',
           '`/ps [3h|7d|30m]` - Conversation activity summary',
           '`@Bot /noMention [on|off|status]` - Alias for group reply mode',
           '`/reset` - Clear session, start fresh',

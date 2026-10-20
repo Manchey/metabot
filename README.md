@@ -255,3 +255,22 @@ MetaBot 由 [XVI Robotics](https://xvirobotics.com) 开发，采用 [MIT License
 ## main-myself 整合版
 
 基于上游 1.3.2，保留每条飞书顶层消息开启独立 thread、`/ps [3h|7d|30m]`、`@Bot /noMention [on|off|status]`（持久化群回复模式别名）、任务表情、上下文使用进度条、Schema 2.0 单选/多选问题按钮和 WebSocket watchdog。问题也支持文字作答。`/model`、`/reset`、`/stop` 等命令作用于当前 thread。部署与回滚说明见 [main-myself-deployment.md](docs/development/main-myself-deployment.md)。
+
+
+### Thread 主题标题与完成通知
+
+每个 thread 根据第一条提问自动生成简短主题标题，后续追问保持同一标题。
+标题保存在会话数据库中，重启、切换模型或重置引擎会话后仍保留。
+已有 thread 在下次使用时根据保存的首条提问补生成标题；原有手动标题优先保留。
+生成失败时使用首条提问的简短版本，下次执行时可重试。
+
+- `/title`：查看当前 thread 标题和修改用法。
+- `/title 新标题`：修改当前 thread 标题，自动生成不会覆盖手动改名。
+
+超过 10 秒的任务沿用原有完成通知发送规则，格式为单行，不显示费用或 Done：
+
+```text
+✅【部署最新完整版本】9.0min · qwen3.8-flash · 156.0k/200k (78%) 🟧🟧🟧🟧🟧🟧🟧🟧⬜⬜
+```
+
+失败任务使用 ❌；缺失的模型或上下文统计会省略。卡片底部统计保持原有显示。

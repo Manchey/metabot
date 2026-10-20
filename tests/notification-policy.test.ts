@@ -94,7 +94,7 @@ describe('sendCompletionNotice', () => {
     expect(sender.sendText).not.toHaveBeenCalled();
   });
 
-  it('sends Done for long successful tasks without voice reply', async () => {
+  it('sends a titled notice for long successful tasks without voice reply', async () => {
     const sender = makeSender();
     await sendCompletionNotice({
       sender,
@@ -105,7 +105,7 @@ describe('sendCompletionNotice', () => {
       durationMs: 10_000,
     });
 
-    expect(sender.sendText).toHaveBeenCalledWith('chat', '✅ Done');
+    expect(sender.sendText).toHaveBeenCalledWith('chat', '✅【prompt】10.0s');
   });
 
   it('sends Failed for long failed tasks', async () => {
@@ -119,7 +119,35 @@ describe('sendCompletionNotice', () => {
       durationMs: 10_000,
     });
 
-    expect(sender.sendText).toHaveBeenCalledWith('chat', '❌ Failed');
+    expect(sender.sendText).toHaveBeenCalledWith('chat', '❌【prompt】10.0s');
+  });
+
+  it('matches the single-line format without costs', async () => {
+    const sender = makeSender();
+    await sendCompletionNotice({ sender, config: makeConfig(), logger: { warn: vi.fn() } as any,
+      chatId: 'chat', title: '部署最新完整版本', durationMs: 540_000,
+      state: { ...makeState('complete'), model: 'qwen3.8-flash', costUsd: 6.76, sessionCostUsd: 19,
+        totalTokens: 156_000, contextWindow: 200_000 },
+    });
+    expect(sender.sendText).toHaveBeenCalledWith('chat',
+      '✅【部署最新完整版本】9.0min · qwen3.8-flash · 156.0k/200k (78%) 🟧🟧🟧🟧🟧🟧🟧🟧⬜⬜');
+  });
+
+  it('clamps overflowing context bars and falls back if title lookup fails', async () => {
+    const sender = makeSender();
+    await sendCompletionNotice({ sender, config: makeConfig(), logger: { warn: vi.fn() } as any,
+      chatId: 'chat', durationMs: 60_000, getTitle: async () => { throw new Error('lookup failed'); },
+      state: { ...makeState('error'), userPrompt: '【服务】\n诊断', totalTokens: 250_000, contextWindow: 200_000 },
+    });
+    expect(sender.sendText).toHaveBeenCalledWith('chat',
+      '❌【服务 诊断】1.0min · 250.0k/200k (125%) 🟥🟥🟥🟥🟥🟥🟥🟥🟥🟥');
+  });
+
+  it('does not resolve a title for a skipped notification', async () => {
+    const getTitle = vi.fn();
+    await sendCompletionNotice({ sender: makeSender(), config: makeConfig(), logger: {} as any,
+      chatId: 'chat', state: makeState('complete'), durationMs: 500, getTitle });
+    expect(getTitle).not.toHaveBeenCalled();
   });
 
   it('logs and swallows send failures', async () => {
